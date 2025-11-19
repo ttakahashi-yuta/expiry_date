@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "839751815101",
+    "project_id": "expiry-date-d0fed",
+    "storage_bucket": "expiry-date-d0fed.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:839751815101:android:e02a87ce23dd468e028cd4",
+        "android_client_info": {
+          "package_name": "com.example.expiry_date"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "839751815101-s8o9vu7psab60dq2b7onq3srmjbh2pfq.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBTt5UQ6Ynam7xXF-_8IUVyIOHcTPuiRFo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "839751815101-s8o9vu7psab60dq2b7onq3srmjbh2pfq.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "839751815101-q7kvfl6ecbrc7ptfnq6vgu8c1bejg6dp.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.expiryDate"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
