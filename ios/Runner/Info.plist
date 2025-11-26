@@ -22,10 +22,25 @@
 	<string>$(FLUTTER_BUILD_NAME)</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.839751815101-q7kvfl6ecbrc7ptfnq6vgu8c1bejg6dp</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>バーコードと賞味期限を読み取るためにカメラを使用します。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>賞味期限画像を選択・保存するためにフォトライブラリへアクセスします。</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
@@ -45,9 +60,5 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>NSCameraUsageDescription</key>
-    <string>バーコードと賞味期限を読み取るためにカメラを使用します。</string>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>賞味期限画像を選択・保存するためにフォトライブラリへアクセスします。</string>
 </dict>
 </plist>

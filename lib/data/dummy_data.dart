@@ -21,7 +21,7 @@ final List<SnackItem> dummySnacks = [
   ),
   SnackItem(
     name: 'ポテトチップス うすしお',
-    expiry: DateTime(2025, 12, 5),
+    expiry: DateTime(2025, 12, 1),
     price: 120,
   ),
   SnackItem(
