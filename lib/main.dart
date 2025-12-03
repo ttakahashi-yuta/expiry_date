@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:expiry_date/data/dummy_data.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'package:expiry_date/models/snack_item.dart';
 import 'package:expiry_date/screens/settings_screen.dart';
 import 'package:expiry_date/core/settings/app_settings.dart';
-import 'screens/add_snack_flow_screen.dart';
 import 'package:expiry_date/screens/add_snack_flow_screen.dart';
-import 'package:firebase_core/firebase_core.dart';
+import 'package:expiry_date/core/user/user_providers.dart';
+import 'package:expiry_date/core/user/user_repository.dart';
+import 'package:expiry_date/screens/shop_selection_screen.dart';
+
 import 'firebase_options.dart';
 import 'core/auth/auth_repository.dart';
 import 'screens/sign_in_screen.dart';
@@ -43,9 +48,10 @@ class ExpiryDateApp extends StatelessWidget {
   }
 }
 
-/// FirebaseAuth の状態に応じて
+/// FirebaseAuth / Firestore の状態に応じて
 /// - 未ログイン: SignInScreen
-/// - ログイン済み: 在庫一覧画面
+/// - ログイン済み & ショップ未選択: ShopSelectionScreen
+/// - ログイン済み & ショップ選択済み: 在庫一覧画面（HomeScreen）
 /// を出し分けるゲート。
 class AuthGate extends ConsumerWidget {
   const AuthGate({super.key});
@@ -53,20 +59,57 @@ class AuthGate extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final authState = ref.watch(authStateChangesProvider);
+    final appUserAsync = ref.watch(appUserStreamProvider);
 
     return authState.when(
       data: (user) {
         if (user == null) {
           // 未ログイン → ログイン画面へ
           return const SignInScreen();
-        } else {
-          // ログイン済み → 在庫一覧画面へ
-          //
-          // ★ここがあなたの「今のメイン画面の Widget 名」にあたります。
-          //   例：SnackListScreen / HomeScreen / InventoryScreen など。
-          //   実際のクラス名に置き換えてください。
-          return const HomeScreen();
         }
+
+        // ログイン済み → users/{uid} を必ず作成しておく（fire-and-forget）
+        final userRepo = ref.read(userRepositoryProvider);
+        userRepo.ensureUserDocument(user);
+
+        // Firestore の users/{uid} ドキュメントを見て、
+        // currentShopId の有無で画面を出し分ける。
+        return appUserAsync.when(
+          data: (appUser) {
+            if (appUser == null) {
+              // users/{uid} ドキュメントがまだ無い／読み込み中
+              return const Scaffold(
+                body: Center(
+                  child: CircularProgressIndicator(),
+                ),
+              );
+            }
+
+            final currentShopId = appUser.currentShopId;
+
+            // null または 空文字 は「ショップ未選択」とみなす
+            if (currentShopId == null || currentShopId.isEmpty) {
+              return const ShopSelectionScreen();
+            }
+
+            // ショップ選択済み → 在庫一覧画面へ
+            return const HomeScreen();
+          },
+          loading: () {
+            return const Scaffold(
+              body: Center(
+                child: CircularProgressIndicator(),
+              ),
+            );
+          },
+          error: (error, stack) {
+            return Scaffold(
+              body: Center(
+                child: Text('ユーザー情報の取得中にエラーが発生しました: $error'),
+              ),
+            );
+          },
+        );
       },
       loading: () {
         return const Scaffold(
@@ -86,7 +129,6 @@ class AuthGate extends ConsumerWidget {
   }
 }
 
-
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
@@ -95,43 +137,15 @@ class HomeScreen extends ConsumerStatefulWidget {
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  late List<SnackItem> _snacks;
-  final Map<String, String> _janNameCache = {};
-
-  @override
-  void initState() {
-    super.initState();
-    _snacks = List.from(dummySnacks);
-
-    // 既存データからも、JANコードがあればキャッシュしておく（将来用）
-    for (final snack in _snacks) {
-      if (snack.janCode != null && snack.name.isNotEmpty) {
-        _janNameCache[snack.janCode!] = snack.name;
-      }
-    }
-  }
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
 
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
-
-    int expiredCount = 0;
-    int soonCount = 0;
-    int safeCount = 0;
-
-    for (final snack in _snacks) {
-      final daysLeft = snack.expiry.difference(now).inDays;
-      if (daysLeft < 0) {
-        expiredCount++;
-      } else if (daysLeft <= 7) {
-        soonCount++;
-      } else {
-        safeCount++;
-      }
-    }
-
-    final List<SnackItem> sortedSnacks = List.from(_snacks)
-      ..sort((a, b) => a.expiry.compareTo(b.expiry));
+    // ← ここで一度だけ取得しておく（安全な ancestor から）
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+    // 現在のユーザーが操作している shopId を取得
+    final shopId = ref.watch(currentShopIdProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -144,7 +158,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ),
         actions: [
           PopupMenuButton<String>(
-            onSelected: (value) {
+            onSelected: (value) async {
               switch (value) {
                 case 'settings':
                   Navigator.of(context).push(
@@ -156,6 +170,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   break;
                 case 'about':
                 // TODO: このアプリについて
+                  break;
+                case 'logout':
+                // ログアウト
+                  final authRepo = ref.read(authRepositoryProvider);
+                  await authRepo.signOut();
                   break;
               }
             },
@@ -172,129 +191,259 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 value: 'about',
                 child: Text('このアプリについて'),
               ),
+              PopupMenuItem(
+                value: 'logout',
+                child: Text('ログアウト'),
+              ),
             ],
           ),
           const SizedBox(width: 4),
         ],
-
       ),
 
       // =======================
       // メインリスト部分
       // =======================
-      body: Column(
-        children: [
-          Padding(
-            padding:
-            const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _buildStatusIndicator(Icons.error, Colors.red, '期限切れ',
-                    expiredCount),
-                _buildStatusIndicator(
-                    Icons.warning, Colors.amber, 'もうすぐ', soonCount),
-                _buildStatusIndicator(
-                    Icons.check_circle, Colors.green, '余裕あり', safeCount),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: ListView.builder(
-              itemCount: sortedSnacks.length,
-              itemBuilder: (context, index) {
-                final snack = sortedSnacks[index];
-                final daysLeft = snack.expiry.difference(now).inDays;
-                final isExpired = daysLeft < 0;
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: _db
+            .collection('shops')
+            .doc(shopId)
+            .collection('snacks')
+            .snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(
+              child: Text('在庫の取得中にエラーが発生しました: ${snapshot.error}'),
+            );
+          }
 
-                final Color backgroundColor;
-                if (isExpired) {
-                  backgroundColor = Colors.red.shade50;
-                } else if (daysLeft <= 7) {
-                  backgroundColor = Colors.amber.shade50;
-                } else {
-                  backgroundColor = Colors.green.shade50;
-                }
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
 
-                // ★ ここだけ Riverpod 化（UIはそのまま）
-                final confirmDelete = ref.watch(confirmDeleteProvider);
+          final docs = snapshot.data!.docs;
 
-                return Dismissible(
-                  key: ValueKey(snack.name),
-                  direction: DismissDirection.endToStart,
-                  background: Container(
-                    alignment: Alignment.centerRight,
-                    color: Colors.red.shade400,
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    child: const Icon(
-                      Icons.delete_forever,
-                      color: Colors.white,
-                      size: 30,
-                    ),
+          // Firestore のドキュメントから SnackItem のリストを作成
+          final entries = docs.map((doc) {
+            final data = doc.data();
+            final expiryTs = data['expiry'] as Timestamp?;
+            final expiry = expiryTs?.toDate() ?? DateTime.now();
+
+            final snack = SnackItem(
+              name: data['name'] as String? ?? '',
+              expiry: expiry,
+              janCode: data['janCode'] as String?,
+              price: (data['price'] as num?)?.toInt(),
+            );
+
+            return _SnackDocEntry(
+              docId: doc.id,
+              snack: snack,
+            );
+          }).toList();
+
+          // 賞味期限順にソート
+          entries.sort(
+                (a, b) => a.snack.expiry.compareTo(b.snack.expiry),
+          );
+
+          // ステータス別カウント
+          int expiredCount = 0;
+          int soonCount = 0;
+          int safeCount = 0;
+
+          for (final entry in entries) {
+            final daysLeft = entry.snack.expiry.difference(now).inDays;
+            if (daysLeft < 0) {
+              expiredCount++;
+            } else if (daysLeft <= 7) {
+              soonCount++;
+            } else {
+              safeCount++;
+            }
+          }
+
+          final confirmDelete = ref.watch(confirmDeleteProvider);
+
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  vertical: 8.0,
+                  horizontal: 16.0,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    _buildStatusIndicator(
+                        Icons.error, Colors.red, '期限切れ', expiredCount),
+                    _buildStatusIndicator(
+                        Icons.warning, Colors.amber, 'もうすぐ', soonCount),
+                    _buildStatusIndicator(
+                        Icons.check_circle, Colors.green, '余裕あり', safeCount),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: entries.isEmpty
+                    ? const Center(
+                  child: Text(
+                    'まだ在庫が登録されていません。\n下の＋ボタンから追加してください。',
+                    textAlign: TextAlign.center,
                   ),
-                  confirmDismiss: (direction) async {
-                    if (!confirmDelete) {
-                      // 削除確認OFF → 即削除
-                      return true;
-                    }
-                    // 削除確認ON → ダイアログ表示
-                    return await showDialog<bool>(
-                      context: context,
-                      builder: (context) => AlertDialog(
-                        title: const Text('削除の確認'),
-                        content: Text('「${snack.name}」を削除しますか？'),
-                        actions: [
-                          TextButton(
-                            onPressed: () =>
-                                Navigator.of(context).pop(false),
-                            child: const Text('キャンセル'),
-                          ),
-                          TextButton(
-                            onPressed: () =>
-                                Navigator.of(context).pop(true),
-                            child: const Text('削除',
-                                style: TextStyle(color: Colors.red)),
-                          ),
-                        ],
-                      ),
-                    ) ??
-                        false;
-                  },
-                  onDismissed: (direction) {
-                    setState(() {
-                      _snacks.remove(snack);
-                    });
+                )
+                    : ListView.builder(
+                  itemCount: entries.length,
+                  itemBuilder: (context, index) {
+                    final entry = entries[index];
+                    final snack = entry.snack;
+                    final daysLeft =
+                        snack.expiry.difference(now).inDays;
+                    final isExpired = daysLeft < 0;
 
-                    ScaffoldMessenger.of(context).clearSnackBars();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('「${snack.name}」を削除しました'),
-                        action: SnackBarAction(
-                          label: '元に戻す',
-                          onPressed: () {
-                            setState(() {
-                              _snacks.add(snack);
-                            });
-                          },
+                    final Color backgroundColor;
+                    if (isExpired) {
+                      backgroundColor = Colors.red.shade50;
+                    } else if (daysLeft <= 7) {
+                      backgroundColor = Colors.amber.shade50;
+                    } else {
+                      backgroundColor = Colors.green.shade50;
+                    }
+
+                    return Dismissible(
+                      key: ValueKey(entry.docId),
+                      direction: DismissDirection.endToStart,
+                      background: Container(
+                        alignment: Alignment.centerRight,
+                        color: Colors.red.shade400,
+                        padding:
+                        const EdgeInsets.symmetric(horizontal: 20),
+                        child: const Icon(
+                          Icons.delete_forever,
+                          color: Colors.white,
+                          size: 30,
                         ),
-                        duration: const Duration(seconds: 3),
+                      ),
+                      confirmDismiss: (direction) async {
+                        if (!confirmDelete) {
+                          // 削除確認OFF → 即削除
+                          return true;
+                        }
+                        // 削除確認ON → ダイアログ表示
+                        return await showDialog<bool>(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('削除の確認'),
+                            content: Text(
+                                '「${snack.name}」を削除しますか？'),
+                            actions: [
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.of(context)
+                                        .pop(false),
+                                child: const Text('キャンセル'),
+                              ),
+                              TextButton(
+                                onPressed: () =>
+                                    Navigator.of(context).pop(true),
+                                child: const Text(
+                                  '削除',
+                                  style:
+                                  TextStyle(color: Colors.red),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ) ??
+                            false;
+                      },
+                      onDismissed: (direction) async {
+                        final deletedEntry = entry;
+
+                        try {
+                          await _db
+                              .collection('shops')
+                              .doc(shopId)
+                              .collection('snacks')
+                              .doc(entry.docId)
+                              .delete();
+                        } catch (e) {
+                          if (!mounted) return;
+                          scaffoldMessenger.clearSnackBars();
+                          scaffoldMessenger.showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                  '在庫の削除に失敗しました: $e'),
+                            ),
+                          );
+                          return;
+                        }
+
+                        if (!mounted) return;
+                        scaffoldMessenger.clearSnackBars();
+                        scaffoldMessenger.showSnackBar(
+                          SnackBar(
+                            content: Text(
+                                '「${deletedEntry.snack.name}」を削除しました'),
+                            action: SnackBarAction(
+                              label: '元に戻す',
+                              onPressed: () async {
+                                final user = FirebaseAuth
+                                    .instance.currentUser;
+                                try {
+                                  await _db
+                                      .collection('shops')
+                                      .doc(shopId)
+                                      .collection('snacks')
+                                      .doc(deletedEntry.docId)
+                                      .set({
+                                    'name': deletedEntry.snack.name,
+                                    'expiry': Timestamp.fromDate(
+                                        deletedEntry.snack.expiry),
+                                    'janCode':
+                                    deletedEntry.snack.janCode,
+                                    'price': deletedEntry.snack.price,
+                                    'createdAt':
+                                    FieldValue.serverTimestamp(),
+                                    'createdByUserId': user?.uid,
+                                  });
+                                } catch (e) {
+                                  if (!mounted) return;
+                                  scaffoldMessenger.showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                          '元に戻す処理に失敗しました: $e'),
+                                    ),
+                                  );
+                                }
+                              },
+                            ),
+                            duration: const Duration(seconds: 3),
+                          ),
+                        );
+                      },
+                      child: _buildSnackCard(
+                        snack,
+                        daysLeft,
+                        backgroundColor,
                       ),
                     );
                   },
-                  child: _buildSnackCard(snack, daysLeft, backgroundColor),
-                );
-              },
-            ),
-          ),
-        ],
+                ),
+              ),
+            ],
+          );
+        },
       ),
-      bottomNavigationBar: _buildBottomActionBar(context),
+      bottomNavigationBar:
+      _buildBottomActionBar(context, scaffoldMessenger, shopId),
     );
   }
 
-  /// 駄菓子カードUI（★元のまま）
-  Widget _buildSnackCard(SnackItem snack, int daysLeft, Color backgroundColor) {
+  /// 駄菓子カードUI
+  Widget _buildSnackCard(
+      SnackItem snack, int daysLeft, Color backgroundColor) {
     final bool isExpired = daysLeft < 0;
     final String expiryText =
     snack.expiry.toLocal().toString().split(' ')[0]; // yyyy-MM-dd 部分だけ
@@ -438,7 +587,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 状態アイコンバー（★元のまま）
+  /// 状態アイコンバー
   Widget _buildStatusIndicator(
       IconData icon, Color color, String label, int count) {
     return Row(
@@ -459,7 +608,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  Widget _buildBottomActionBar(BuildContext context) {
+  Widget _buildBottomActionBar(
+      BuildContext context,
+      ScaffoldMessengerState scaffoldMessenger,
+      String shopId,
+      ) {
     return SafeArea(
       top: false,
       child: Container(
@@ -481,29 +634,43 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               icon: const Icon(Icons.search),
               onPressed: () {
                 // TODO: 検索機能を実装
-                // 今は空のままでOK
               },
             ),
 
             // 中央：赤い丸＋（新規追加）
             GestureDetector(
               onTap: () async {
-                final newItem = await Navigator.of(context).push<SnackItem>(
+                final newItem =
+                await Navigator.of(context).push<SnackItem>(
                   MaterialPageRoute(
-                    builder: (_) => AddSnackFlowScreen(
-                      janNameCache: _janNameCache,
-                    ),
+                    builder: (_) => const AddSnackFlowScreen(),
                   ),
                 );
 
                 if (newItem != null) {
-                  setState(() {
-                    _snacks.add(newItem);
-
-                    if (newItem.janCode != null && newItem.name.isNotEmpty) {
-                      _janNameCache[newItem.janCode!] = newItem.name;
-                    }
-                  });
+                  // Firestore に在庫データを保存
+                  try {
+                    final user = FirebaseAuth.instance.currentUser;
+                    await _db
+                        .collection('shops')
+                        .doc(shopId)
+                        .collection('snacks')
+                        .add({
+                      'name': newItem.name,
+                      'expiry': Timestamp.fromDate(newItem.expiry),
+                      'janCode': newItem.janCode,
+                      'price': newItem.price,
+                      'createdAt': FieldValue.serverTimestamp(),
+                      'createdByUserId': user?.uid,
+                    });
+                  } catch (e) {
+                    if (!mounted) return;
+                    scaffoldMessenger.showSnackBar(
+                      SnackBar(
+                        content: Text('在庫データの保存に失敗しました: $e'),
+                      ),
+                    );
+                  }
                 }
               },
               child: Container(
@@ -526,7 +693,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               icon: const Icon(Icons.filter_list),
               onPressed: () {
                 // TODO: フィルタ機能を実装
-                // （期限が近い順 / 期限切れのみ など）
               },
             ),
           ],
@@ -534,5 +700,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ),
     );
   }
+}
 
+/// Firestore ドキュメントIDと SnackItem をまとめて扱うための小さなクラス
+class _SnackDocEntry {
+  const _SnackDocEntry({
+    required this.docId,
+    required this.snack,
+  });
+
+  final String docId;
+  final SnackItem snack;
 }

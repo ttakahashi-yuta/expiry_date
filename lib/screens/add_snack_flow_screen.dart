@@ -2,11 +2,14 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import '../models/snack_item.dart';
+import 'package:expiry_date/core/jan_master/jan_master_repository.dart';
 
 enum AddSnackStep {
   scanBarcode,
@@ -14,19 +17,15 @@ enum AddSnackStep {
   editDetails,
 }
 
-class AddSnackFlowScreen extends StatefulWidget {
-  const AddSnackFlowScreen({
-    super.key,
-    required this.janNameCache,
-  });
-
-  final Map<String, String> janNameCache;
+class AddSnackFlowScreen extends ConsumerStatefulWidget {
+  const AddSnackFlowScreen({super.key});
 
   @override
-  State<AddSnackFlowScreen> createState() => _AddSnackFlowScreenState();
+  ConsumerState<AddSnackFlowScreen> createState() =>
+      _AddSnackFlowScreenState();
 }
 
-class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
+class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   AddSnackStep _step = AddSnackStep.scanBarcode;
   bool _isScanningBarcode = true;
 
@@ -112,12 +111,11 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
 
               setState(() {
                 _janCode = rawValue;
-                if (widget.janNameCache.containsKey(rawValue)) {
-                  // 過去に登録したことのあるJANなら商品名を自動入力
-                  _nameController.text = widget.janNameCache[rawValue]!;
-                }
                 _step = AddSnackStep.captureExpiry;
               });
+
+              // Firestore 上の JAN マスタから、商品名・売価を自動入力する
+              _loadJanMasterForJanCode(rawValue);
 
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('JANコードを取得しました: $rawValue')),
@@ -170,7 +168,9 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
             style: Theme.of(context)
                 .textTheme
                 .bodySmall
-                ?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                ?.copyWith(
+                color:
+                Theme.of(context).colorScheme.onSurfaceVariant),
           ),
           const SizedBox(height: 16),
           if (_expiryImage != null)
@@ -246,7 +246,9 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
           FilledButton.icon(
             onPressed: _isRunningOcr ? null : _onTapCaptureExpiry,
             icon: const Icon(Icons.camera_alt_outlined),
-            label: Text(_expiryImage == null ? 'カメラを起動して撮影する' : 'もう一度撮影する'),
+            label: Text(
+              _expiryImage == null ? 'カメラを起動して撮影する' : 'もう一度撮影する',
+            ),
           ),
           const SizedBox(height: 12),
           FilledButton(
@@ -265,7 +267,8 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
                 : () {
               setState(() {
                 _step = AddSnackStep.editDetails;
-                _ocrErrorMessage = 'OCRをスキップしたため、賞味期限は手入力してください。';
+                _ocrErrorMessage =
+                'OCRをスキップしたため、賞味期限は手入力してください。';
               });
             },
             child: const Text('OCRを使わずに手入力する'),
@@ -367,7 +370,7 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton(
-                    onPressed: _onSubmit,
+                    onPressed: () => _onSubmit(),
                     child: const Text('商品を追加'),
                   ),
                 ),
@@ -441,7 +444,7 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
   }
 
   // 「商品を追加」押下時
-  void _onSubmit() {
+  Future<void> _onSubmit() async {
     if (_formKey.currentState?.validate() != true) {
       return;
     }
@@ -459,7 +462,13 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
     int? price;
 
     if (priceText.isNotEmpty) {
-      price = int.parse(priceText.replaceAll(',', ''));
+      price = int.tryParse(priceText.replaceAll(',', ''));
+      if (price == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('売価には数値を入力してください。')),
+        );
+        return;
+      }
     }
 
     final snack = SnackItem(
@@ -469,7 +478,64 @@ class _AddSnackFlowScreenState extends State<AddSnackFlowScreen> {
       price: price,
     );
 
+    // JANコードがある場合は、JANマスタを更新（最後に入力した値として保存）
+    await _updateJanMasterIfNeeded(snack);
+
+    if (!mounted) return;
     Navigator.of(context).pop(snack);
+  }
+
+  /// JANコードに対応する JAN マスタ情報を読み込み、
+  /// 商品名・売価の入力欄を自動補完する。
+  Future<void> _loadJanMasterForJanCode(String janCode) async {
+    try {
+      final repo = ref.read(janMasterRepositoryProvider);
+      final entry = await repo.fetchJan(janCode);
+
+      if (!mounted || entry == null) return;
+
+      setState(() {
+        if (_nameController.text.trim().isEmpty) {
+          _nameController.text = entry.name;
+        }
+        if (entry.price != null) {
+          _priceController.text = entry.price.toString();
+        }
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('過去の登録データを読み込みました')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('JANマスタの読み込みに失敗しました: $e')),
+      );
+    }
+  }
+
+  /// JANマスタへの upsert（JANコードが無い場合は何もしない）。
+  Future<void> _updateJanMasterIfNeeded(SnackItem snack) async {
+    final jan = snack.janCode;
+    if (jan == null || jan.isEmpty) {
+      return;
+    }
+
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      final repo = ref.read(janMasterRepositoryProvider);
+      await repo.upsertJan(
+        janCode: jan,
+        name: snack.name,
+        price: snack.price,
+        userId: user?.uid ?? 'anonymous',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('JANマスタの更新に失敗しました: $e')),
+      );
+    }
   }
 
   DateTime? _parseExpiryFromField(String? text) {
