@@ -32,7 +32,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   String? _janCode;
 
   final TextEditingController _nameController = TextEditingController();
-  final TextEditingController _expiryController = TextEditingController();
   final TextEditingController _priceController = TextEditingController();
 
   final _formKey = GlobalKey<FormState>();
@@ -43,12 +42,33 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   String? _ocrErrorMessage;
   XFile? _expiryImage;
 
+  // 賞味期限（プルダウン＋カレンダー用）
+  int? _selectedYear;
+  int? _selectedMonth;
+  int? _selectedDay;
+
   @override
   void dispose() {
     _nameController.dispose();
-    _expiryController.dispose();
     _priceController.dispose();
     super.dispose();
+  }
+
+  DateTime? _buildSelectedExpiry() {
+    if (_selectedYear == null || _selectedMonth == null || _selectedDay == null) {
+      return null;
+    }
+    try {
+      return DateTime(_selectedYear!, _selectedMonth!, _selectedDay!);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _applyExpiryFromDate(DateTime date) {
+    _selectedYear = date.year;
+    _selectedMonth = date.month;
+    _selectedDay = date.day;
   }
 
   @override
@@ -151,6 +171,8 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   // 2. 賞味期限撮影＋OCRステップ
+  //
+  // 撮影→OCR終了後、そのまま商品情報入力画面（editDetails）へ遷移。
   Widget _buildCaptureExpiryStep(BuildContext context) {
     return SingleChildScrollView(
       key: const ValueKey('capture_expiry'),
@@ -169,8 +191,8 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                 .textTheme
                 .bodySmall
                 ?.copyWith(
-                color:
-                Theme.of(context).colorScheme.onSurfaceVariant),
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
           const SizedBox(height: 16),
           if (_expiryImage != null)
@@ -251,16 +273,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
             ),
           ),
           const SizedBox(height: 12),
-          FilledButton(
-            onPressed: (_expiryImage == null || _isRunningOcr)
-                ? null
-                : () {
-              setState(() {
-                _step = AddSnackStep.editDetails;
-              });
-            },
-            child: const Text('この結果で次へ'),
-          ),
           TextButton(
             onPressed: _isRunningOcr
                 ? null
@@ -268,7 +280,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
               setState(() {
                 _step = AddSnackStep.editDetails;
                 _ocrErrorMessage =
-                'OCRをスキップしたため、賞味期限は手入力してください。';
+                'OCRをスキップしたため、賞味期限は手動で選択してください。';
               });
             },
             child: const Text('OCRを使わずに手入力する'),
@@ -279,7 +291,20 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   // 3. 商品名／賞味期限／売価の入力ステップ
+  //
+  // 賞味期限は「年・月・日」のプルダウン＋
+  // その下に「カレンダーから選択」ボタン＋
+  // その下に「賞味期限をもう一度撮影する」ボタン。
   Widget _buildEditDetailsStep(BuildContext context) {
+    final now = DateTime.now();
+    final years = List<int>.generate(6, (i) => now.year + i); // 今年〜+5年
+    final months = List<int>.generate(12, (i) => i + 1);
+
+    final int baseYear = _selectedYear ?? now.year;
+    final int baseMonth = _selectedMonth ?? 1;
+    final int maxDay = _daysInMonth(baseYear, baseMonth);
+    final days = List<int>.generate(maxDay, (i) => i + 1);
+
     return SingleChildScrollView(
       key: const ValueKey('edit_details'),
       padding: const EdgeInsets.all(16),
@@ -314,28 +339,149 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                 return null;
               },
             ),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _expiryController,
-              decoration: InputDecoration(
-                labelText: '賞味期限',
-                hintText: '例）2025/12/31',
-                helperText: _ocrErrorMessage ??
-                    'OCR結果を元に自動入力されています。必要に応じて修正してください。',
-              ),
-              keyboardType: TextInputType.datetime,
-              textInputAction: TextInputAction.next,
-              validator: (value) {
-                if (value == null || value.trim().isEmpty) {
-                  return '賞味期限を入力してください';
-                }
-                if (_parseExpiryFromField(value) == null) {
-                  return '日付の形式が正しくありません（例：2025/12/31）';
-                }
-                return null;
-              },
+            const SizedBox(height: 24),
+            Text(
+              '賞味期限',
+              style: Theme.of(context).textTheme.labelLarge,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 4),
+            if (_ocrErrorMessage != null) ...[
+              Text(
+                _ocrErrorMessage!,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 4),
+            ],
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<int>(
+                    key: const ValueKey('year_dropdown'),
+                    decoration: const InputDecoration(
+                      labelText: '年',
+                    ),
+                    items: years
+                        .map(
+                          (y) => DropdownMenuItem<int>(
+                        value: y,
+                        child: Text('$y年'),
+                      ),
+                    )
+                        .toList(),
+                    initialValue: _selectedYear,
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedYear = value;
+                        if (_selectedMonth != null && _selectedDay != null) {
+                          final newMaxDay =
+                          _daysInMonth(_selectedYear!, _selectedMonth!);
+                          if (_selectedDay! > newMaxDay) {
+                            _selectedDay = newMaxDay;
+                          }
+                        }
+                      });
+                    },
+                    validator: (value) {
+                      if (value == null) {
+                        return '年を選択してください';
+                      }
+                      return null;
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: DropdownButtonFormField<int>(
+                    key: const ValueKey('month_dropdown'),
+                    decoration: const InputDecoration(
+                      labelText: '月',
+                    ),
+                    items: months
+                        .map(
+                          (m) => DropdownMenuItem<int>(
+                        value: m,
+                        child: Text('$m月'),
+                      ),
+                    )
+                        .toList(),
+                    initialValue: _selectedMonth,
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedMonth = value;
+                        if (_selectedYear != null && _selectedDay != null) {
+                          final newMaxDay =
+                          _daysInMonth(_selectedYear!, _selectedMonth!);
+                          if (_selectedDay! > newMaxDay) {
+                            _selectedDay = newMaxDay;
+                          }
+                        }
+                      });
+                    },
+                    validator: (value) {
+                      if (value == null) {
+                        return '月を選択してください';
+                      }
+                      return null;
+                    },
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: DropdownButtonFormField<int>(
+                    key: const ValueKey('day_dropdown'),
+                    decoration: const InputDecoration(
+                      labelText: '日',
+                    ),
+                    items: days
+                        .map(
+                          (d) => DropdownMenuItem<int>(
+                        value: d,
+                        child: Text('$d日'),
+                      ),
+                    )
+                        .toList(),
+                    initialValue:
+                    _selectedDay != null && _selectedDay! <= maxDay
+                        ? _selectedDay
+                        : null,
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedDay = value;
+                      });
+                    },
+                    validator: (value) {
+                      if (value == null) {
+                        return '日を選択してください';
+                      }
+                      return null;
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => _onTapSelectDateWithCalendar(context),
+                icon: const Icon(Icons.calendar_today),
+                label: const Text('カレンダーから選択'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _isRunningOcr ? null : _onTapCaptureExpiry,
+                icon: const Icon(Icons.camera_alt_outlined),
+                label: const Text('賞味期限をもう一度撮影する'),
+              ),
+            ),
+            const SizedBox(height: 8),
             TextFormField(
               controller: _priceController,
               decoration: const InputDecoration(
@@ -382,7 +528,32 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     );
   }
 
-  // 賞味期限撮影＋OCRの実装
+  // カレンダーから日付を選択
+  Future<void> _onTapSelectDateWithCalendar(BuildContext context) async {
+    final now = DateTime.now();
+    final initial =
+        _buildSelectedExpiry() ?? DateTime(now.year, now.month, now.day);
+    final first = DateTime(now.year - 1, 1, 1);
+    final last = DateTime(now.year + 10, 12, 31);
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: first,
+      lastDate: last,
+    );
+
+    if (picked != null) {
+      setState(() {
+        _applyExpiryFromDate(picked);
+        _ocrErrorMessage = null;
+      });
+    }
+  }
+
+  // 賞味期限撮影＋OCR
+  //
+  // 撮影して OCR → プルダウンに値を反映し、そのまま editDetails へ。
   Future<void> _onTapCaptureExpiry() async {
     if (kIsWeb) {
       setState(() {
@@ -428,12 +599,19 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
         _isRunningOcr = false;
         _ocrRawText = text;
         if (parsed != null) {
-          _expiryController.text = _formatDate(parsed);
+          _applyExpiryFromDate(parsed);
           _ocrErrorMessage = null;
         } else {
           _ocrErrorMessage =
-          '賞味期限の日付を自動で特定できませんでした。テキストを参考に手入力してください。';
+          '賞味期限の日付を自動で特定できませんでした。プルダウンまたはカレンダーから選択してください。';
         }
+      });
+
+      if (!mounted) return;
+
+      // 撮影後は確認画面を挟まず、そのまま商品情報入力画面へ。
+      setState(() {
+        _step = AddSnackStep.editDetails;
       });
     } catch (e) {
       setState(() {
@@ -449,10 +627,10 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       return;
     }
 
-    final DateTime? expiry = _parseExpiryFromField(_expiryController.text);
+    final DateTime? expiry = _buildSelectedExpiry();
     if (expiry == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('賞味期限の日付形式を確認してください。')),
+        const SnackBar(content: Text('賞味期限を選択してください。')),
       );
       return;
     }
@@ -538,14 +716,13 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     }
   }
 
-  DateTime? _parseExpiryFromField(String? text) {
-    if (text == null || text.trim().isEmpty) {
-      return null;
-    }
-    return _tryParseExpiryFromText(text);
-  }
-
   // OCR結果のテキストから日付っぽい部分を抜き出してDateTimeにする
+  //
+  // 対応形式:
+  // - 2025/12/31, 2025-12-31, 2025.12.31
+  // - 25/12/31, 25-12-31 → 2025/12/31
+  // - 2027/07, 2027-07, 2027.7 → 2027/07/末日
+  // - 27/07, 27-07, 27.7 → 2027/07/末日
   DateTime? _tryParseExpiryFromText(String text) {
     final normalized = text
         .replaceAll('年', '/')
@@ -566,8 +743,8 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     }
 
     // 例：25/12/31, 25-12-31 など（西暦下2桁扱いで 2000+xx とみなす）
-    final match2 =
-    RegExp(r'(\d{2})[./\-](\d{1,2})[./\-](\d{1,2})').firstMatch(normalized);
+    final match2 = RegExp(r'(\d{2})[./\-](\d{1,2})[./\-](\d{1,2})')
+        .firstMatch(normalized);
     if (match2 != null) {
       final twoDigitYear = int.parse(match2.group(1)!);
       final year = 2000 + twoDigitYear;
@@ -575,6 +752,35 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       final day = int.parse(match2.group(3)!);
       if (_isValidYmd(year, month, day)) {
         return DateTime(year, month, day);
+      }
+    }
+
+    // 4桁年 + 月（例: 2027/07, 2027-07, 2027.7）→ 月末日扱い
+    final matchYearMonth4 =
+    RegExp(r'(\d{4})[./\-](\d{1,2})').firstMatch(normalized);
+    if (matchYearMonth4 != null) {
+      final year = int.parse(matchYearMonth4.group(1)!);
+      final month = int.parse(matchYearMonth4.group(2)!);
+      if (month >= 1 && month <= 12) {
+        final lastDay = _lastDayOfMonth(year, month);
+        if (_isValidYmd(year, month, lastDay)) {
+          return DateTime(year, month, lastDay);
+        }
+      }
+    }
+
+    // 2桁年 + 月（例: 27/07, 27-07, 27.7）→ 20xx 年 + 月末日扱い
+    final matchYearMonth2 =
+    RegExp(r'(\d{2})[./\-](\d{1,2})').firstMatch(normalized);
+    if (matchYearMonth2 != null) {
+      final twoDigitYear = int.parse(matchYearMonth2.group(1)!);
+      final year = 2000 + twoDigitYear;
+      final month = int.parse(matchYearMonth2.group(2)!);
+      if (month >= 1 && month <= 12) {
+        final lastDay = _lastDayOfMonth(year, month);
+        if (_isValidYmd(year, month, lastDay)) {
+          return DateTime(year, month, lastDay);
+        }
       }
     }
 
@@ -593,10 +799,13 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     }
   }
 
-  String _formatDate(DateTime date) {
-    final y = date.year.toString().padLeft(4, '0');
-    final m = date.month.toString().padLeft(2, '0');
-    final d = date.day.toString().padLeft(2, '0');
-    return '$y/$m/$d';
+  /// 与えられた [year], [month] の月末日（28〜31 のいずれか）を返す。
+  int _lastDayOfMonth(int year, int month) {
+    final lastDate = DateTime(year, month + 1, 0);
+    return lastDate.day;
+  }
+
+  int _daysInMonth(int year, int month) {
+    return _lastDayOfMonth(year, month);
   }
 }
