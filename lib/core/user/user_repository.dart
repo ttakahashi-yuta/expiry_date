@@ -21,14 +21,49 @@ class UserRepository {
   ///
   /// ※新規作成時には currentShopId は設定せず、
   ///   「ショップ未選択」の状態を null で表現する。
+  ///
+  /// ※既存ドキュメントがある場合：
+  ///   Appleログイン等では displayName/email が null になることがあるため、
+  ///   null で上書きしないように注意する。
   Future<AppUser> ensureUserDocument(User firebaseUser) async {
     final docRef = _usersRef.doc(firebaseUser.uid);
     final snapshot = await docRef.get();
 
     if (snapshot.exists) {
-      return AppUser.fromFirestore(snapshot);
+      // 既存ユーザー：nullで上書きしない範囲で、必要なら更新する
+      final existing = AppUser.fromFirestore(snapshot);
+
+      final String? newDisplayName = firebaseUser.displayName;
+      final String? newEmail = firebaseUser.email;
+
+      final Map<String, Object?> updates = <String, Object?>{};
+
+      // displayName: Auth側が null なら更新しない
+      if (newDisplayName != null &&
+          newDisplayName.trim().isNotEmpty &&
+          newDisplayName != existing.displayName) {
+        updates['displayName'] = newDisplayName;
+      }
+
+      // email: Auth側が null なら更新しない
+      if (newEmail != null &&
+          newEmail.trim().isNotEmpty &&
+          newEmail != existing.email) {
+        updates['email'] = newEmail;
+      }
+
+      // 何かしら更新があるときだけ updatedAt を更新する
+      if (updates.isNotEmpty) {
+        updates['updatedAt'] = FieldValue.serverTimestamp();
+        await docRef.update(updates);
+        final updatedSnapshot = await docRef.get();
+        return AppUser.fromFirestore(updatedSnapshot);
+      }
+
+      return existing;
     }
 
+    // 新規ユーザー：displayName/email が null の可能性はあるが、そのまま保存でOK
     await docRef.set(<String, Object?>{
       // currentShopId はあえて書かない（null のまま＝ショップ未選択）
       'displayName': firebaseUser.displayName,
