@@ -12,6 +12,7 @@ import 'package:expiry_date/core/user/user_providers.dart';
 import 'package:expiry_date/core/user/user_repository.dart';
 import 'package:expiry_date/screens/shop_selection_screen.dart';
 import 'package:expiry_date/screens/edit_snack_screen.dart';
+import 'package:expiry_date/screens/trash_screen.dart';
 
 import 'firebase_options.dart';
 import 'core/auth/auth_repository.dart';
@@ -178,6 +179,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     MaterialPageRoute(builder: (_) => const SettingsScreen()),
                   );
                   break;
+                case 'trash':
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const TrashScreen()),
+                  );
+                  break;
                 case 'help':
                 // TODO: ヘルプ画面
                   break;
@@ -194,6 +200,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               PopupMenuItem(
                 value: 'settings',
                 child: Text('設定'),
+              ),
+              PopupMenuItem(
+                value: 'trash',
+                child: Text('ゴミ箱'),
               ),
               PopupMenuItem(
                 value: 'help',
@@ -227,6 +237,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               .collection('shops')
               .doc(shopId)
               .collection('snacks')
+              .where('isArchived', isEqualTo: false)
               .snapshots(),
           builder: (context, snapshot) {
             if (snapshot.hasError) {
@@ -264,8 +275,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             allEntries.sort(
                   (a, b) => a.snack.expiry.compareTo(b.snack.expiry),
             );
-
-            final confirmDelete = ref.watch(confirmDeleteProvider);
 
             // 検索クエリだけをトリガーに、リスト部分だけを再ビルド
             return ValueListenableBuilder<String>(
@@ -312,11 +321,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
                           _buildStatusIndicator(
-                              Icons.error, Colors.red, '期限切れ', expiredCount),
+                            Icons.error,
+                            Colors.red,
+                            '期限切れ',
+                            expiredCount,
+                          ),
                           _buildStatusIndicator(
-                              Icons.warning, Colors.amber, 'もうすぐ', soonCount),
+                            Icons.warning,
+                            Colors.amber,
+                            'もうすぐ',
+                            soonCount,
+                          ),
                           _buildStatusIndicator(
-                              Icons.check_circle, Colors.green, '余裕あり', safeCount),
+                            Icons.check_circle,
+                            Colors.green,
+                            '余裕あり',
+                            safeCount,
+                          ),
                         ],
                       ),
                     ),
@@ -356,116 +377,66 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                               alignment: Alignment.centerRight,
                               color: Colors.red.shade400,
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 20),
+                                horizontal: 20,
+                              ),
                               child: const Icon(
-                                Icons.delete_forever,
+                                Icons.delete_outline,
                                 color: Colors.white,
                                 size: 30,
                               ),
                             ),
-                            confirmDismiss: (direction) async {
-                              if (!confirmDelete) {
-                                // 削除確認OFF → 即削除
-                                return true;
-                              }
-                              // 削除確認ON → ダイアログ表示
-                              return await showDialog<bool>(
-                                context: context,
-                                builder: (context) => AlertDialog(
-                                  title: const Text('削除の確認'),
-                                  content: Text(
-                                      '「${snack.name}」を削除しますか？'),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.of(context)
-                                              .pop(false),
-                                      child: const Text('キャンセル'),
-                                    ),
-                                    TextButton(
-                                      onPressed: () =>
-                                          Navigator.of(context)
-                                              .pop(true),
-                                      child: const Text(
-                                        '削除',
-                                        style: TextStyle(
-                                            color: Colors.red),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ) ??
-                                  false;
-                            },
                             onDismissed: (direction) async {
-                              final deletedEntry = entry;
-
                               try {
+                                final user =
+                                    FirebaseAuth.instance.currentUser;
                                 await _db
                                     .collection('shops')
                                     .doc(shopId)
                                     .collection('snacks')
                                     .doc(entry.docId)
-                                    .delete();
+                                    .update({
+                                  'isArchived': true,
+                                  'archivedAt':
+                                  FieldValue.serverTimestamp(),
+                                  'archivedByUserId': user?.uid,
+                                  'updatedAt':
+                                  FieldValue.serverTimestamp(),
+                                  'updatedByUserId': user?.uid,
+                                });
+
+                                if (!mounted) return;
+                                scaffoldMessenger.clearSnackBars();
+                                scaffoldMessenger.showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      '「${snack.name}」をゴミ箱に移動しました',
+                                    ),
+                                    action: SnackBarAction(
+                                      label: 'ゴミ箱を見る',
+                                      onPressed: () {
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                            const TrashScreen(),
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                    duration:
+                                    const Duration(seconds: 3),
+                                  ),
+                                );
                               } catch (e) {
                                 if (!mounted) return;
                                 scaffoldMessenger.clearSnackBars();
                                 scaffoldMessenger.showSnackBar(
                                   SnackBar(
                                     content: Text(
-                                        '在庫の削除に失敗しました: $e'),
+                                      'ゴミ箱への移動に失敗しました: $e',
+                                    ),
                                   ),
                                 );
-                                return;
                               }
-
-                              if (!mounted) return;
-                              scaffoldMessenger.clearSnackBars();
-                              scaffoldMessenger.showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                      '「${deletedEntry.snack.name}」を削除しました'),
-                                  action: SnackBarAction(
-                                    label: '元に戻す',
-                                    onPressed: () async {
-                                      final user = FirebaseAuth
-                                          .instance.currentUser;
-                                      try {
-                                        await _db
-                                            .collection('shops')
-                                            .doc(shopId)
-                                            .collection('snacks')
-                                            .doc(deletedEntry.docId)
-                                            .set({
-                                          'name':
-                                          deletedEntry.snack.name,
-                                          'expiry':
-                                          Timestamp.fromDate(
-                                              deletedEntry
-                                                  .snack.expiry),
-                                          'janCode':
-                                          deletedEntry.snack.janCode,
-                                          'price':
-                                          deletedEntry.snack.price,
-                                          'createdAt': FieldValue
-                                              .serverTimestamp(),
-                                          'createdByUserId': user?.uid,
-                                        });
-                                      } catch (e) {
-                                        if (!mounted) return;
-                                        scaffoldMessenger.showSnackBar(
-                                          SnackBar(
-                                            content: Text(
-                                                '元に戻す処理に失敗しました: $e'),
-                                          ),
-                                        );
-                                      }
-                                    },
-                                  ),
-                                  duration:
-                                  const Duration(seconds: 3),
-                                ),
-                              );
                             },
                             child: InkWell(
                               onTap: () async {
@@ -506,8 +477,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 駄菓子カードUI
-  Widget _buildSnackCard(
-      SnackItem snack, int daysLeft, Color backgroundColor) {
+  Widget _buildSnackCard(SnackItem snack, int daysLeft, Color backgroundColor) {
     final bool isExpired = daysLeft < 0;
     final String expiryText =
     snack.expiry.toLocal().toString().split(' ')[0]; // yyyy-MM-dd 部分だけ
@@ -659,7 +629,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   /// 状態アイコンバー
   Widget _buildStatusIndicator(
-      IconData icon, Color color, String label, int count) {
+      IconData icon,
+      Color color,
+      String label,
+      int count,
+      ) {
     return Row(
       children: [
         Icon(icon, color: color, size: 22),
@@ -781,8 +755,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           // 中央：赤い丸＋（新規追加）
           GestureDetector(
             onTap: () async {
-              final newItem =
-              await Navigator.of(context).push<SnackItem>(
+              final newItem = await Navigator.of(context).push<SnackItem>(
                 MaterialPageRoute(
                   builder: (_) => const AddSnackFlowScreen(),
                 ),
@@ -801,8 +774,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     'expiry': Timestamp.fromDate(newItem.expiry),
                     'janCode': newItem.janCode,
                     'price': newItem.price,
+                    'isArchived': false,
                     'createdAt': FieldValue.serverTimestamp(),
                     'createdByUserId': user?.uid,
+                    'updatedAt': FieldValue.serverTimestamp(),
+                    'updatedByUserId': user?.uid,
                   });
                 } catch (e) {
                   if (!mounted) return;
