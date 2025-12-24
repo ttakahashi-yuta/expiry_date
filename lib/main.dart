@@ -6,7 +6,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'package:expiry_date/models/snack_item.dart';
 import 'package:expiry_date/screens/settings_screen.dart';
-import 'package:expiry_date/core/settings/app_settings.dart';
 import 'package:expiry_date/screens/add_snack_flow_screen.dart';
 import 'package:expiry_date/core/user/user_providers.dart';
 import 'package:expiry_date/core/user/user_repository.dart';
@@ -147,6 +146,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final FocusNode _searchFocusNode = FocusNode();
   final ValueNotifier<String> _searchQuery = ValueNotifier<String>('');
 
+  // =======================
+  // Flicker対策：Streamの再生成を止める
+  // =======================
+  String? _snacksStreamShopId;
+  Stream<QuerySnapshot<Map<String, dynamic>>>? _snacksStream;
+  QuerySnapshot<Map<String, dynamic>>? _lastSnacksSnapshot;
+
+  Stream<QuerySnapshot<Map<String, dynamic>>> _getSnacksStream(String shopId) {
+    if (_snacksStream == null || _snacksStreamShopId != shopId) {
+      _snacksStreamShopId = shopId;
+      _snacksStream = _db
+          .collection('shops')
+          .doc(shopId)
+          .collection('snacks')
+          .where('isArchived', isEqualTo: false)
+          .snapshots();
+    }
+    return _snacksStream!;
+  }
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -233,12 +252,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           FocusScope.of(context).unfocus();
         },
         child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-          stream: _db
-              .collection('shops')
-              .doc(shopId)
-              .collection('snacks')
-              .where('isArchived', isEqualTo: false)
-              .snapshots(),
+          stream: _getSnacksStream(shopId),
           builder: (context, snapshot) {
             if (snapshot.hasError) {
               return Center(
@@ -246,11 +260,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               );
             }
 
-            if (snapshot.connectionState == ConnectionState.waiting) {
+            // データが取れたら保持しておく（次のrebuildでwaitingになっても表示を維持する）
+            if (snapshot.hasData) {
+              _lastSnacksSnapshot = snapshot.data;
+            }
+
+            // waitingでも、直前データがあればそれを表示して全画面ローディングにしない
+            final effectiveSnapshot = snapshot.data ?? _lastSnacksSnapshot;
+
+            if (effectiveSnapshot == null) {
+              // 初回だけローディング
               return const Center(child: CircularProgressIndicator());
             }
 
-            final docs = snapshot.data!.docs;
+            final docs = effectiveSnapshot.docs;
 
             // Firestore のドキュメントから SnackItem のリストを作成（全件）
             final allEntries = docs.map((doc) {
@@ -408,18 +431,50 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                 scaffoldMessenger.clearSnackBars();
                                 scaffoldMessenger.showSnackBar(
                                   SnackBar(
+                                    behavior: SnackBarBehavior.floating,
+                                    margin: const EdgeInsets.all(12),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
+                                    ),
                                     content: Text(
-                                      '「${snack.name}」をゴミ箱に移動しました',
+                                      'ゴミ箱に移動: ${snack.name}',
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      softWrap: false,
                                     ),
                                     action: SnackBarAction(
-                                      label: 'ゴミ箱を見る',
-                                      onPressed: () {
-                                        Navigator.of(context).push(
-                                          MaterialPageRoute(
-                                            builder: (_) =>
-                                            const TrashScreen(),
-                                          ),
-                                        );
+                                      label: '元に戻す',
+                                      onPressed: () async {
+                                        try {
+                                          final currentUser = FirebaseAuth
+                                              .instance.currentUser;
+                                          await _db
+                                              .collection('shops')
+                                              .doc(shopId)
+                                              .collection('snacks')
+                                              .doc(entry.docId)
+                                              .update({
+                                            'isArchived': false,
+                                            'archivedAt': null,
+                                            'archivedByUserId': null,
+                                            'updatedAt': FieldValue
+                                                .serverTimestamp(),
+                                            'updatedByUserId':
+                                            currentUser?.uid,
+                                          });
+                                        } catch (e) {
+                                          if (!mounted) return;
+                                          scaffoldMessenger
+                                              .clearSnackBars();
+                                          scaffoldMessenger.showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                '元に戻せませんでした: $e',
+                                              ),
+                                            ),
+                                          );
+                                        }
                                       },
                                     ),
                                     duration:

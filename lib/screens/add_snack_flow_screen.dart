@@ -55,7 +55,9 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   DateTime? _buildSelectedExpiry() {
-    if (_selectedYear == null || _selectedMonth == null || _selectedDay == null) {
+    if (_selectedYear == null ||
+        _selectedMonth == null ||
+        _selectedDay == null) {
       return null;
     }
     try {
@@ -74,6 +76,9 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      // ここはデフォルト(true)のまま：キーボード表示時に body の高さが縮み、
+      // 下部のボタン列（editDetailsで表示）が自動的にキーボードの上に来る。
+      resizeToAvoidBottomInset: true,
       appBar: AppBar(
         title: const Text('商品を追加'),
       ),
@@ -187,10 +192,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
           const SizedBox(height: 12),
           Text(
             '賞味期限の文字がはっきり写るように、ピントと明るさを調整してください。',
-            style: Theme.of(context)
-                .textTheme
-                .bodySmall
-                ?.copyWith(
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
@@ -292,9 +294,10 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
   // 3. 商品名／賞味期限／売価の入力ステップ
   //
-  // 賞味期限は「年・月・日」のプルダウン＋
-  // その下に「カレンダーから選択」ボタン＋
-  // その下に「賞味期限をもう一度撮影する」ボタン。
+  // ここが今回の修正ポイント：
+  // - ボタン列（キャンセル/商品を追加）をスクロール領域の外に出し、
+  //   キーボード表示時でも常に押せるようにする。
+  // - その代わり、フォームは Expanded + ScrollView で自然にスクロール可能にする。
   Widget _buildEditDetailsStep(BuildContext context) {
     final now = DateTime.now();
     final years = List<int>.generate(6, (i) => now.year + i); // 今年〜+5年
@@ -305,205 +308,241 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     final int maxDay = _daysInMonth(baseYear, baseMonth);
     final days = List<int>.generate(maxDay, (i) => i + 1);
 
-    return SingleChildScrollView(
+    return Column(
       key: const ValueKey('edit_details'),
-      padding: const EdgeInsets.all(16),
-      child: Form(
-        key: _formKey,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (_janCode != null) ...[
-              Text(
-                'JANコード',
-                style: Theme.of(context).textTheme.labelLarge,
-              ),
-              const SizedBox(height: 4),
-              SelectableText(
-                _janCode!,
-                style: Theme.of(context).textTheme.bodyLarge,
-              ),
-              const SizedBox(height: 16),
-            ],
-            TextFormField(
-              controller: _nameController,
-              decoration: const InputDecoration(
-                labelText: '商品名',
-                hintText: '例）うまい棒 めんたい味',
-              ),
-              textInputAction: TextInputAction.next,
-              validator: (value) {
-                if (value == null || value.trim().isEmpty) {
-                  return '商品名を入力してください';
-                }
-                return null;
-              },
-            ),
-            const SizedBox(height: 24),
-            Text(
-              '賞味期限',
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 4),
-            if (_ocrErrorMessage != null) ...[
-              Text(
-                _ocrErrorMessage!,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.error,
-                  fontSize: 13,
-                ),
-              ),
-              const SizedBox(height: 4),
-            ],
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField<int>(
-                    key: const ValueKey('year_dropdown'),
-                    decoration: const InputDecoration(
-                      labelText: '年',
-                    ),
-                    items: years
-                        .map(
-                          (y) => DropdownMenuItem<int>(
-                        value: y,
-                        child: Text('$y年'),
+      children: [
+        Expanded(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () {
+              FocusScope.of(context).unfocus();
+            },
+            child: SingleChildScrollView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: const EdgeInsets.all(16),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_janCode != null) ...[
+                      Text(
+                        'JANコード',
+                        style: Theme.of(context).textTheme.labelLarge,
                       ),
-                    )
-                        .toList(),
-                    initialValue: _selectedYear,
-                    onChanged: (value) {
-                      setState(() {
-                        _selectedYear = value;
-                        if (_selectedMonth != null && _selectedDay != null) {
-                          final newMaxDay =
-                          _daysInMonth(_selectedYear!, _selectedMonth!);
-                          if (_selectedDay! > newMaxDay) {
-                            _selectedDay = newMaxDay;
-                          }
+                      const SizedBox(height: 4),
+                      SelectableText(
+                        _janCode!,
+                        style: Theme.of(context).textTheme.bodyLarge,
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    TextFormField(
+                      controller: _nameController,
+                      decoration: const InputDecoration(
+                        labelText: '商品名',
+                        hintText: '例）うまい棒 めんたい味',
+                      ),
+                      textInputAction: TextInputAction.next,
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return '商品名を入力してください';
                         }
-                      });
-                    },
-                    validator: (value) {
-                      if (value == null) {
-                        return '年を選択してください';
-                      }
-                      return null;
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: DropdownButtonFormField<int>(
-                    key: const ValueKey('month_dropdown'),
-                    decoration: const InputDecoration(
-                      labelText: '月',
+                        return null;
+                      },
                     ),
-                    items: months
-                        .map(
-                          (m) => DropdownMenuItem<int>(
-                        value: m,
-                        child: Text('$m月'),
+                    const SizedBox(height: 24),
+                    Text(
+                      '賞味期限',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 4),
+                    if (_ocrErrorMessage != null) ...[
+                      Text(
+                        _ocrErrorMessage!,
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                          fontSize: 13,
+                        ),
                       ),
-                    )
-                        .toList(),
-                    initialValue: _selectedMonth,
-                    onChanged: (value) {
-                      setState(() {
-                        _selectedMonth = value;
-                        if (_selectedYear != null && _selectedDay != null) {
-                          final newMaxDay =
-                          _daysInMonth(_selectedYear!, _selectedMonth!);
-                          if (_selectedDay! > newMaxDay) {
-                            _selectedDay = newMaxDay;
-                          }
+                      const SizedBox(height: 4),
+                    ],
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<int>(
+                            key: const ValueKey('year_dropdown'),
+                            decoration: const InputDecoration(
+                              labelText: '年',
+                            ),
+                            items: years
+                                .map(
+                                  (y) => DropdownMenuItem<int>(
+                                value: y,
+                                child: Text('$y年'),
+                              ),
+                            )
+                                .toList(),
+                            initialValue: _selectedYear,
+                            onChanged: (value) {
+                              setState(() {
+                                _selectedYear = value;
+                                if (_selectedMonth != null &&
+                                    _selectedDay != null) {
+                                  final newMaxDay = _daysInMonth(
+                                      _selectedYear!, _selectedMonth!);
+                                  if (_selectedDay! > newMaxDay) {
+                                    _selectedDay = newMaxDay;
+                                  }
+                                }
+                              });
+                            },
+                            validator: (value) {
+                              if (value == null) {
+                                return '年を選択してください';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: DropdownButtonFormField<int>(
+                            key: const ValueKey('month_dropdown'),
+                            decoration: const InputDecoration(
+                              labelText: '月',
+                            ),
+                            items: months
+                                .map(
+                                  (m) => DropdownMenuItem<int>(
+                                value: m,
+                                child: Text('$m月'),
+                              ),
+                            )
+                                .toList(),
+                            initialValue: _selectedMonth,
+                            onChanged: (value) {
+                              setState(() {
+                                _selectedMonth = value;
+                                if (_selectedYear != null &&
+                                    _selectedDay != null) {
+                                  final newMaxDay = _daysInMonth(
+                                      _selectedYear!, _selectedMonth!);
+                                  if (_selectedDay! > newMaxDay) {
+                                    _selectedDay = newMaxDay;
+                                  }
+                                }
+                              });
+                            },
+                            validator: (value) {
+                              if (value == null) {
+                                return '月を選択してください';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: DropdownButtonFormField<int>(
+                            key: const ValueKey('day_dropdown'),
+                            decoration: const InputDecoration(
+                              labelText: '日',
+                            ),
+                            items: days
+                                .map(
+                                  (d) => DropdownMenuItem<int>(
+                                value: d,
+                                child: Text('$d日'),
+                              ),
+                            )
+                                .toList(),
+                            initialValue: _selectedDay != null &&
+                                _selectedDay! <= maxDay
+                                ? _selectedDay
+                                : null,
+                            onChanged: (value) {
+                              setState(() {
+                                _selectedDay = value;
+                              });
+                            },
+                            validator: (value) {
+                              if (value == null) {
+                                return '日を選択してください';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () =>
+                            _onTapSelectDateWithCalendar(context),
+                        icon: const Icon(Icons.calendar_today),
+                        label: const Text('カレンダーから選択'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: _isRunningOcr ? null : _onTapCaptureExpiry,
+                        icon: const Icon(Icons.camera_alt_outlined),
+                        label: const Text('賞味期限をもう一度撮影する'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextFormField(
+                      controller: _priceController,
+                      decoration: const InputDecoration(
+                        labelText: '売価（円）',
+                        hintText: '例）30',
+                      ),
+                      keyboardType: TextInputType.number,
+                      textInputAction: TextInputAction.done,
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return null;
                         }
-                      });
-                    },
-                    validator: (value) {
-                      if (value == null) {
-                        return '月を選択してください';
-                      }
-                      return null;
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: DropdownButtonFormField<int>(
-                    key: const ValueKey('day_dropdown'),
-                    decoration: const InputDecoration(
-                      labelText: '日',
+                        final normalized = value.replaceAll(',', '').trim();
+                        final parsed = int.tryParse(normalized);
+                        if (parsed == null || parsed < 0) {
+                          return '0以上の数値を入力してください';
+                        }
+                        return null;
+                      },
+                      onFieldSubmitted: (_) {
+                        _onSubmit();
+                      },
                     ),
-                    items: days
-                        .map(
-                          (d) => DropdownMenuItem<int>(
-                        value: d,
-                        child: Text('$d日'),
-                      ),
-                    )
-                        .toList(),
-                    initialValue:
-                    _selectedDay != null && _selectedDay! <= maxDay
-                        ? _selectedDay
-                        : null,
-                    onChanged: (value) {
-                      setState(() {
-                        _selectedDay = value;
-                      });
-                    },
-                    validator: (value) {
-                      if (value == null) {
-                        return '日を選択してください';
-                      }
-                      return null;
-                    },
-                  ),
+                    const SizedBox(height: 24),
+                    // 末尾が詰まりすぎないように少し余白
+                    const SizedBox(height: 8),
+                  ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: () => _onTapSelectDateWithCalendar(context),
-                icon: const Icon(Icons.calendar_today),
-                label: const Text('カレンダーから選択'),
               ),
             ),
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: _isRunningOcr ? null : _onTapCaptureExpiry,
-                icon: const Icon(Icons.camera_alt_outlined),
-                label: const Text('賞味期限をもう一度撮影する'),
+          ),
+        ),
+        SafeArea(
+          top: false,
+          child: Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surface,
+              border: Border(
+                top: BorderSide(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                  width: 0.8,
+                ),
               ),
             ),
-            const SizedBox(height: 8),
-            TextFormField(
-              controller: _priceController,
-              decoration: const InputDecoration(
-                labelText: '売価（円）',
-                hintText: '例）30',
-              ),
-              keyboardType: TextInputType.number,
-              textInputAction: TextInputAction.done,
-              validator: (value) {
-                if (value == null || value.trim().isEmpty) {
-                  return null;
-                }
-                final normalized = value.replaceAll(',', '').trim();
-                final parsed = int.tryParse(normalized);
-                if (parsed == null || parsed < 0) {
-                  return '0以上の数値を入力してください';
-                }
-                return null;
-              },
-            ),
-            const SizedBox(height: 24),
-            Row(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+            child: Row(
               children: [
                 Expanded(
                   child: OutlinedButton(
@@ -522,9 +561,9 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                 ),
               ],
             ),
-          ],
+          ),
         ),
-      ),
+      ],
     );
   }
 
@@ -623,6 +662,8 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
   // 「商品を追加」押下時
   Future<void> _onSubmit() async {
+    FocusScope.of(context).unfocus();
+
     if (_formKey.currentState?.validate() != true) {
       return;
     }
@@ -731,8 +772,8 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
         .replaceAll(RegExp(r'[^0-9/.\-]'), ' ');
 
     // 例：2025/12/31, 2025-12-31, 2025.12.31
-    final match4 =
-    RegExp(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})').firstMatch(normalized);
+    final match4 = RegExp(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
+        .firstMatch(normalized);
     if (match4 != null) {
       final year = int.parse(match4.group(1)!);
       final month = int.parse(match4.group(2)!);

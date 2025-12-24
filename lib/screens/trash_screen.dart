@@ -227,7 +227,26 @@ class TrashScreen extends ConsumerWidget {
 
                       scaffoldMessenger.clearSnackBars();
                       scaffoldMessenger.showSnackBar(
-                        SnackBar(content: Text('「${snack.name}」を元に戻しました')),
+                        SnackBar(
+                          content: Text('「${snack.name}」を元に戻しました'),
+                          action: SnackBarAction(
+                            label: '元に戻す',
+                            onPressed: () async {
+                              await db
+                                  .collection('shops')
+                                  .doc(shopId)
+                                  .collection('snacks')
+                                  .doc(entry.docId)
+                                  .update({
+                                'isArchived': true,
+                                'archivedAt': FieldValue.serverTimestamp(),
+                                'archivedByUserId': user?.uid,
+                                'updatedAt': FieldValue.serverTimestamp(),
+                                'updatedByUserId': user?.uid,
+                              });
+                            },
+                          ),
+                        ),
                       );
                     } else {
                       // 完全削除
