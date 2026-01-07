@@ -160,7 +160,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           .collection('shops')
           .doc(shopId)
           .collection('snacks')
-          .where('isArchived', isEqualTo: false)
           .snapshots();
     }
     return _snacksStream!;
@@ -193,6 +192,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           PopupMenuButton<String>(
             onSelected: (value) async {
               switch (value) {
+                case 'shop':
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const ShopSelectionScreen()),
+                  );
+                  break;
                 case 'settings':
                   Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const SettingsScreen()),
@@ -216,6 +220,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               }
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'shop',
+                child: Text('店舗'),
+              ),
               PopupMenuItem(
                 value: 'settings',
                 child: Text('設定'),
@@ -275,8 +283,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
             final docs = effectiveSnapshot.docs;
 
+            // isArchived が true のもの（ゴミ箱行き）は通常一覧では非表示。
+            // 過去データで isArchived が未設定(null/フィールド無し)の場合は未アーカイブ扱いで表示する。
+            final visibleDocs = docs.where((doc) {
+              final data = doc.data();
+              return data['isArchived'] != true;
+            }).toList();
+
             // Firestore のドキュメントから SnackItem のリストを作成（全件）
-            final allEntries = docs.map((doc) {
+            final allEntries = visibleDocs.map((doc) {
               final data = doc.data();
               final expiryTs = data['expiry'] as Timestamp?;
               final expiry = expiryTs?.toDate() ?? DateTime.now();
