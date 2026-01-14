@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -21,8 +22,7 @@ class AddSnackFlowScreen extends ConsumerStatefulWidget {
   const AddSnackFlowScreen({super.key});
 
   @override
-  ConsumerState<AddSnackFlowScreen> createState() =>
-      _AddSnackFlowScreenState();
+  ConsumerState<AddSnackFlowScreen> createState() => _AddSnackFlowScreenState();
 }
 
 class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
@@ -42,6 +42,11 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   String? _ocrErrorMessage;
   XFile? _expiryImage;
 
+  // ===== OCR デバッグ用（開発時のみ表示）
+  // TODO: リリース前に削除/無効化する（kDebugModeで隠れているが念のため）
+  String? _ocrNormalizedForDebug;
+  DateTime? _ocrParsedForDebug;
+
   // 賞味期限（プルダウン＋カレンダー用）
   int? _selectedYear;
   int? _selectedMonth;
@@ -55,9 +60,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   DateTime? _buildSelectedExpiry() {
-    if (_selectedYear == null ||
-        _selectedMonth == null ||
-        _selectedDay == null) {
+    if (_selectedYear == null || _selectedMonth == null || _selectedDay == null) {
       return null;
     }
     try {
@@ -246,25 +249,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
               ),
               const SizedBox(height: 8),
             ],
-            if (_ocrRawText != null && _ocrRawText!.isNotEmpty) ...[
-              Text(
-                'OCRで読み取ったテキスト（参考用）',
-                style: Theme.of(context).textTheme.labelMedium,
-              ),
-              const SizedBox(height: 4),
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(8),
-                  color: Theme.of(context).colorScheme.surfaceVariant,
-                ),
-                child: Text(
-                  _ocrRawText!,
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
           ],
           const SizedBox(height: 24),
           FilledButton.icon(
@@ -281,8 +265,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                 : () {
               setState(() {
                 _step = AddSnackStep.editDetails;
-                _ocrErrorMessage =
-                'OCRをスキップしたため、賞味期限は手動で選択してください。';
+                _ocrErrorMessage = 'OCRをスキップしたため、賞味期限は手動で選択してください。';
               });
             },
             child: const Text('OCRを使わずに手入力する'),
@@ -300,13 +283,56 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   // - その代わり、フォームは Expanded + ScrollView で自然にスクロール可能にする。
   Widget _buildEditDetailsStep(BuildContext context) {
     final now = DateTime.now();
-    final years = List<int>.generate(6, (i) => now.year + i); // 今年〜+5年
+
+    // 年リストは「選択値が items に存在しない」事故を避けるため、選択年を必ず含む範囲にする。
+    // OCR誤認識で極端な年が出た場合にDropdownが落ちないように、現実的な範囲でガードする。
+    final int minPlausibleYear = now.year - 1;
+    final int maxPlausibleYear = now.year + 30;
+
+    int startYear = now.year;
+    int endYear = now.year + 5;
+
+    if (_selectedYear != null) {
+      final y = _selectedYear!;
+      // 極端な値は無視（parse側でも弾くが、万一入ってもUIで落とさない）
+      if (y >= minPlausibleYear && y <= maxPlausibleYear) {
+        startYear = min(startYear, y - 2);
+        endYear = max(endYear, y + 2);
+      }
+    }
+
+    startYear = startYear.clamp(minPlausibleYear, maxPlausibleYear);
+    endYear = endYear.clamp(minPlausibleYear, maxPlausibleYear);
+    if (startYear > endYear) {
+      startYear = now.year;
+      endYear = now.year + 5;
+      startYear = startYear.clamp(minPlausibleYear, maxPlausibleYear);
+      endYear = endYear.clamp(minPlausibleYear, maxPlausibleYear);
+    }
+
+    final years = <int>[
+      for (int y = startYear; y <= endYear; y++) y,
+    ];
+
     final months = List<int>.generate(12, (i) => i + 1);
 
     final int baseYear = _selectedYear ?? now.year;
     final int baseMonth = _selectedMonth ?? 1;
     final int maxDay = _daysInMonth(baseYear, baseMonth);
     final days = List<int>.generate(maxDay, (i) => i + 1);
+
+    final String raw = _ocrRawText ?? '';
+    final String normalized = _ocrNormalizedForDebug ?? '';
+    final String fixed = normalized.isNotEmpty ? _fixDigits(normalized) : '';
+
+    String parsedLabel = 'null';
+    if (_ocrParsedForDebug != null) {
+      final dt = _ocrParsedForDebug!;
+      final y = dt.year.toString().padLeft(4, '0');
+      final m = dt.month.toString().padLeft(2, '0');
+      final d = dt.day.toString().padLeft(2, '0');
+      parsedLabel = '$y-$m-$d';
+    }
 
     return Column(
       key: const ValueKey('edit_details'),
@@ -367,6 +393,48 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                       ),
                       const SizedBox(height: 4),
                     ],
+
+                    // ===== ここだけ追加：編集画面でOCRデバッグを見えるようにする =====
+                    // kDebugMode の時だけ表示（リリースでは出ません）
+                    if (kDebugMode && (_ocrRawText != null)) ...[
+                      const SizedBox(height: 8),
+                      ExpansionTile(
+                        tilePadding: EdgeInsets.zero,
+                        title: const Text('OCRデバッグ（開発時のみ）'),
+                        subtitle: Text(
+                          (_ocrRawText?.trim().isNotEmpty ?? false)
+                              ? '認識文字列を確認できます'
+                              : '認識文字列が空です（点線等で未検出の可能性）',
+                        ),
+                        children: [
+                          _debugBlock(
+                            context: context,
+                            label: 'Raw（加工なし）',
+                            value: raw.isNotEmpty ? raw : '(empty)',
+                          ),
+                          const SizedBox(height: 8),
+                          _debugBlock(
+                            context: context,
+                            label: 'Normalized（パース用正規化）',
+                            value: normalized.isNotEmpty ? normalized : '(empty)',
+                          ),
+                          const SizedBox(height: 8),
+                          _debugBlock(
+                            context: context,
+                            label: 'Fixed（誤認識補正後・パース用）',
+                            value: fixed.isNotEmpty ? fixed : '(empty)',
+                          ),
+                          const SizedBox(height: 8),
+                          _debugBlock(
+                            context: context,
+                            label: 'Parsed（最終パース結果）',
+                            value: parsedLabel,
+                          ),
+                          const SizedBox(height: 8),
+                        ],
+                      ),
+                    ],
+
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.end,
                       children: [
@@ -384,14 +452,13 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                               ),
                             )
                                 .toList(),
-                            initialValue: _selectedYear,
+                            initialValue:
+                            _selectedYear != null && years.contains(_selectedYear) ? _selectedYear : null,
                             onChanged: (value) {
                               setState(() {
                                 _selectedYear = value;
-                                if (_selectedMonth != null &&
-                                    _selectedDay != null) {
-                                  final newMaxDay = _daysInMonth(
-                                      _selectedYear!, _selectedMonth!);
+                                if (_selectedMonth != null && _selectedDay != null) {
+                                  final newMaxDay = _daysInMonth(_selectedYear!, _selectedMonth!);
                                   if (_selectedDay! > newMaxDay) {
                                     _selectedDay = newMaxDay;
                                   }
@@ -425,10 +492,8 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                             onChanged: (value) {
                               setState(() {
                                 _selectedMonth = value;
-                                if (_selectedYear != null &&
-                                    _selectedDay != null) {
-                                  final newMaxDay = _daysInMonth(
-                                      _selectedYear!, _selectedMonth!);
+                                if (_selectedYear != null && _selectedDay != null) {
+                                  final newMaxDay = _daysInMonth(_selectedYear!, _selectedMonth!);
                                   if (_selectedDay! > newMaxDay) {
                                     _selectedDay = newMaxDay;
                                   }
@@ -458,10 +523,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                               ),
                             )
                                 .toList(),
-                            initialValue: _selectedDay != null &&
-                                _selectedDay! <= maxDay
-                                ? _selectedDay
-                                : null,
+                            initialValue: _selectedDay != null && _selectedDay! <= maxDay ? _selectedDay : null,
                             onChanged: (value) {
                               setState(() {
                                 _selectedDay = value;
@@ -481,8 +543,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                     Align(
                       alignment: Alignment.centerLeft,
                       child: TextButton.icon(
-                        onPressed: () =>
-                            _onTapSelectDateWithCalendar(context),
+                        onPressed: () => _onTapSelectDateWithCalendar(context),
                         icon: const Icon(Icons.calendar_today),
                         label: const Text('カレンダーから選択'),
                       ),
@@ -521,7 +582,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                       },
                     ),
                     const SizedBox(height: 24),
-                    // 末尾が詰まりすぎないように少し余白
                     const SizedBox(height: 8),
                   ],
                 ),
@@ -567,11 +627,42 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     );
   }
 
+  Widget _debugBlock({
+    required BuildContext context,
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        color: Theme.of(context).colorScheme.surfaceVariant,
+        border: Border.all(
+          color: Theme.of(context).colorScheme.outlineVariant,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelMedium,
+          ),
+          const SizedBox(height: 6),
+          SelectableText(
+            value,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
+    );
+  }
+
   // カレンダーから日付を選択
   Future<void> _onTapSelectDateWithCalendar(BuildContext context) async {
     final now = DateTime.now();
-    final initial =
-        _buildSelectedExpiry() ?? DateTime(now.year, now.month, now.day);
+    final initial = _buildSelectedExpiry() ?? DateTime(now.year, now.month, now.day);
     final first = DateTime(now.year - 1, 1, 1);
     final last = DateTime(now.year + 10, 12, 31);
 
@@ -606,6 +697,10 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
         _isRunningOcr = true;
         _ocrErrorMessage = null;
         _ocrRawText = null;
+
+        // デバッグ
+        _ocrNormalizedForDebug = null;
+        _ocrParsedForDebug = null;
       });
 
       final XFile? image = await _picker.pickImage(
@@ -627,16 +722,23 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       final textRecognizer = TextRecognizer(
         script: TextRecognitionScript.latin,
       );
-      final RecognizedText recognizedText =
-      await textRecognizer.processImage(inputImage);
+      final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
       await textRecognizer.close();
 
       final String text = recognizedText.text;
+
+      // デバッグ用に正規化テキストも保存（表示はkDebugModeのときだけ）
+      final normalizedForDebug = _normalizeOcrTextForParse(text);
       final DateTime? parsed = _tryParseExpiryFromText(text);
 
       setState(() {
         _isRunningOcr = false;
         _ocrRawText = text;
+
+        // デバッグ
+        _ocrNormalizedForDebug = normalizedForDebug;
+        _ocrParsedForDebug = parsed;
+
         if (parsed != null) {
           _applyExpiryFromDate(parsed);
           _ocrErrorMessage = null;
@@ -759,73 +861,168 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
   // OCR結果のテキストから日付っぽい部分を抜き出してDateTimeにする
   //
-  // 対応形式:
-  // - 2025/12/31, 2025-12-31, 2025.12.31
-  // - 25/12/31, 25-12-31 → 2025/12/31
-  // - 2027/07, 2027-07, 2027.7 → 2027/07/末日
-  // - 27/07, 27-07, 27.7 → 2027/07/末日
+  // なるべく多くのケースを拾うための方針:
+  // - OCR表示用テキスト(_ocrRawText)は一切加工しない（デバッグに必要）
+  // - パース用だけ別に正規化し、誤認識文字を数字に補正する
+  //
+  // 対応強化:
+  // - "2026 / 1/ 30" のような空白混入
+  // - "2026 4" / "Z026, 4" のように区切りが消える・誤認識するケース（年月のみ→月末扱い）
+  // - 1 が I/l、2 が Z、0 が O になる等の誤認識をパース時のみ補正
   DateTime? _tryParseExpiryFromText(String text) {
-    final normalized = text
-        .replaceAll('年', '/')
-        .replaceAll('月', '/')
-        .replaceAll('日', '')
-        .replaceAll(RegExp(r'[^0-9/.\-]'), ' ');
+    final now = DateTime.now();
 
-    // 例：2025/12/31, 2025-12-31, 2025.12.31
-    final match4 = RegExp(r'(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})')
-        .firstMatch(normalized);
-    if (match4 != null) {
-      final year = int.parse(match4.group(1)!);
-      final month = int.parse(match4.group(2)!);
-      final day = int.parse(match4.group(3)!);
+    // まず正規化（区切りは空白へ、数字と英字と空白を残す）
+    final normalized = _normalizeOcrTextForParse(text);
+
+    // 誤認識補正（パース用だけ）
+    final fixed = _fixDigits(normalized);
+
+    final candidates = <DateTime>[];
+
+    // 1) 連続8桁: YYYYMMDD
+    for (final m in RegExp(r'\b(\d{4})(\d{2})(\d{2})\b').allMatches(fixed)) {
+      final year = int.tryParse(m.group(1)!);
+      final month = int.tryParse(m.group(2)!);
+      final day = int.tryParse(m.group(3)!);
+      if (year == null || month == null || day == null) continue;
       if (_isValidYmd(year, month, day)) {
-        return DateTime(year, month, day);
+        final dt = DateTime(year, month, day);
+        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
       }
     }
 
-    // 例：25/12/31, 25-12-31 など（西暦下2桁扱いで 2000+xx とみなす）
-    final match2 = RegExp(r'(\d{2})[./\-](\d{1,2})[./\-](\d{1,2})')
-        .firstMatch(normalized);
-    if (match2 != null) {
-      final twoDigitYear = int.parse(match2.group(1)!);
-      final year = 2000 + twoDigitYear;
-      final month = int.parse(match2.group(2)!);
-      final day = int.parse(match2.group(3)!);
+    // 2) 連続6桁: YYMMDD → 20YY
+    for (final m in RegExp(r'\b(\d{2})(\d{2})(\d{2})\b').allMatches(fixed)) {
+      final yy = int.tryParse(m.group(1)!);
+      final month = int.tryParse(m.group(2)!);
+      final day = int.tryParse(m.group(3)!);
+      if (yy == null || month == null || day == null) continue;
+      final year = 2000 + yy;
       if (_isValidYmd(year, month, day)) {
-        return DateTime(year, month, day);
+        final dt = DateTime(year, month, day);
+        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
       }
     }
 
-    // 4桁年 + 月（例: 2027/07, 2027-07, 2027.7）→ 月末日扱い
-    final matchYearMonth4 =
-    RegExp(r'(\d{4})[./\-](\d{1,2})').firstMatch(normalized);
-    if (matchYearMonth4 != null) {
-      final year = int.parse(matchYearMonth4.group(1)!);
-      final month = int.parse(matchYearMonth4.group(2)!);
-      if (month >= 1 && month <= 12) {
-        final lastDay = _lastDayOfMonth(year, month);
-        if (_isValidYmd(year, month, lastDay)) {
-          return DateTime(year, month, lastDay);
-        }
+    // 3) 空白区切り: YYYY M D（"2026 / 1/ 30" → "2026 1 30"）
+    for (final m in RegExp(r'\b(\d{4})\s+(\d{1,2})\s+(\d{1,2})\b').allMatches(fixed)) {
+      final year = int.tryParse(m.group(1)!);
+      final month = int.tryParse(m.group(2)!);
+      final day = int.tryParse(m.group(3)!);
+      if (year == null || month == null || day == null) continue;
+      if (_isValidYmd(year, month, day)) {
+        final dt = DateTime(year, month, day);
+        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
       }
     }
 
-    // 2桁年 + 月（例: 27/07, 27-07, 27.7）→ 20xx 年 + 月末日扱い
-    final matchYearMonth2 =
-    RegExp(r'(\d{2})[./\-](\d{1,2})').firstMatch(normalized);
-    if (matchYearMonth2 != null) {
-      final twoDigitYear = int.parse(matchYearMonth2.group(1)!);
-      final year = 2000 + twoDigitYear;
-      final month = int.parse(matchYearMonth2.group(2)!);
-      if (month >= 1 && month <= 12) {
-        final lastDay = _lastDayOfMonth(year, month);
-        if (_isValidYmd(year, month, lastDay)) {
-          return DateTime(year, month, lastDay);
-        }
+    // 4) 空白区切り: YY M D → 20YY
+    for (final m in RegExp(r'\b(\d{2})\s+(\d{1,2})\s+(\d{1,2})\b').allMatches(fixed)) {
+      final yy = int.tryParse(m.group(1)!);
+      final month = int.tryParse(m.group(2)!);
+      final day = int.tryParse(m.group(3)!);
+      if (yy == null || month == null || day == null) continue;
+      final year = 2000 + yy;
+      if (_isValidYmd(year, month, day)) {
+        final dt = DateTime(year, month, day);
+        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
       }
     }
 
-    return null;
+    // 5) 年月だけ（YYYY M）→ 月末扱い（"2026 4" / "Z026, 4" → "2026 4"）
+    for (final m in RegExp(r'\b(\d{4})\s+(\d{1,2})\b').allMatches(fixed)) {
+      final year = int.tryParse(m.group(1)!);
+      final month = int.tryParse(m.group(2)!);
+      if (year == null || month == null) continue;
+      if (month < 1 || month > 12) continue;
+      final lastDay = _lastDayOfMonth(year, month);
+      if (_isValidYmd(year, month, lastDay)) {
+        final dt = DateTime(year, month, lastDay);
+        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
+      }
+    }
+
+    // 6) 年月だけ（YY M）→ 20YY + 月末
+    for (final m in RegExp(r'\b(\d{2})\s+(\d{1,2})\b').allMatches(fixed)) {
+      final yy = int.tryParse(m.group(1)!);
+      final month = int.tryParse(m.group(2)!);
+      if (yy == null || month == null) continue;
+      final year = 2000 + yy;
+      if (month < 1 || month > 12) continue;
+      final lastDay = _lastDayOfMonth(year, month);
+      if (_isValidYmd(year, month, lastDay)) {
+        final dt = DateTime(year, month, lastDay);
+        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
+      }
+    }
+
+    if (candidates.isEmpty) return null;
+
+    // 複数候補がある場合、"今に近い将来" を優先（ただし過去も近ければ拾う）
+    candidates.sort((a, b) => _expiryScore(a, now).compareTo(_expiryScore(b, now)));
+    return candidates.first;
+  }
+
+  String _normalizeOcrTextForParse(String text) {
+    // 年/月/日 などの日本語表記も混ざるので空白へ
+    // 区切り候補（/ . - , 全角）も空白へ
+    // 数字・英字・空白のみ残して、それ以外は空白へ（Zなどを消さない）
+    final s = text
+        .replaceAll('年', ' ')
+        .replaceAll('月', ' ')
+        .replaceAll('日', ' ')
+        .replaceAll(RegExp(r'[\/\.\-\,，、]'), ' ')
+        .replaceAll(RegExp(r'[^0-9A-Za-z\s]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+
+    return s;
+  }
+
+  String _fixDigits(String s) {
+    // パース用だけ誤認識を数字に寄せる（表示用テキストはそのまま）
+    // 例: Z026 → 2026, I/ l → 1, O → 0
+    final upper = s.toUpperCase();
+
+    const map = <String, String>{
+      'O': '0',
+      'D': '0',
+      'Q': '0',
+      'I': '1',
+      'L': '1',
+      '|': '1',
+      '!': '1',
+      'Z': '2',
+      'S': '5',
+      'B': '8',
+    };
+
+    final buf = StringBuffer();
+    for (final ch in upper.split('')) {
+      buf.write(map[ch] ?? ch);
+    }
+    return buf.toString();
+  }
+
+  bool _isPlausibleExpiry(DateTime dt, DateTime now) {
+    // 駄菓子の賞味期限は多くが近〜中期（とはいえ例外もある）なので、
+    // 極端に遠い/古すぎるものは誤認識の可能性が高いとして弾く。
+    // - 過去: 10年より古いのは基本ありえない
+    // - 未来: 30年より先は基本ありえない
+    final min = DateTime(now.year - 10, 1, 1);
+    final max = DateTime(now.year + 30, 12, 31);
+    return !dt.isBefore(min) && !dt.isAfter(max);
+  }
+
+  int _expiryScore(DateTime dt, DateTime now) {
+    // 将来の近い日付を優先しつつ、過去でも近ければ次点にする。
+    final diffDays = dt.difference(now).inDays;
+    if (diffDays >= 0) {
+      return diffDays;
+    }
+    // 過去は少しペナルティを付ける（期限切れ商品もあり得るので完全排除しない）
+    return 100000 + diffDays.abs();
   }
 
   bool _isValidYmd(int year, int month, int day) {

@@ -9,6 +9,7 @@ import 'package:expiry_date/screens/settings_screen.dart';
 import 'package:expiry_date/screens/add_snack_flow_screen.dart';
 import 'package:expiry_date/core/user/user_providers.dart';
 import 'package:expiry_date/core/user/user_repository.dart';
+import 'package:expiry_date/core/settings/app_settings.dart';
 import 'package:expiry_date/screens/shop_selection_screen.dart';
 import 'package:expiry_date/screens/edit_snack_screen.dart';
 import 'package:expiry_date/screens/trash_screen.dart';
@@ -178,6 +179,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final now = DateTime.now();
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     final shopId = ref.watch(currentShopIdProvider);
+    final soonThresholdDays = ref.watch(appSettingsProvider).soonThresholdDays;
 
     return Scaffold(
       appBar: AppBar(
@@ -194,7 +196,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               switch (value) {
                 case 'shop':
                   Navigator.of(context).push(
-                    MaterialPageRoute(builder: (_) => const ShopSelectionScreen()),
+                    MaterialPageRoute(
+                        builder: (_) => const ShopSelectionScreen()),
                   );
                   break;
                 case 'settings':
@@ -341,7 +344,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   final daysLeft = entry.snack.expiry.difference(now).inDays;
                   if (daysLeft < 0) {
                     expiredCount++;
-                  } else if (daysLeft <= 7) {
+                  } else if (daysLeft <= soonThresholdDays) {
                     soonCount++;
                   } else {
                     safeCount++;
@@ -402,7 +405,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           final Color backgroundColor;
                           if (isExpired) {
                             backgroundColor = Colors.red.shade50;
-                          } else if (daysLeft <= 7) {
+                          } else if (daysLeft <= soonThresholdDays) {
                             backgroundColor = Colors.amber.shade50;
                           } else {
                             backgroundColor = Colors.green.shade50;

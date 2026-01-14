@@ -42,6 +42,10 @@ android {
     }
 }
 
+dependencies {
+    // 日本語OCR（ML Kit Text Recognition Japanese）
+    implementation("com.google.mlkit:text-recognition-japanese:16.0.0")
+}
 flutter {
     source = "../.."
 }
