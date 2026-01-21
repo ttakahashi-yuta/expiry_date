@@ -29,6 +29,9 @@ void main() async {
 class ExpiryDateApp extends StatelessWidget {
   const ExpiryDateApp({super.key});
 
+  static const double _minTextScale = 0.90;
+  static const double _maxTextScale = 1.00;
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -36,14 +39,28 @@ class ExpiryDateApp extends StatelessWidget {
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.orange,
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Colors.white,
-          foregroundColor: Colors.black87,
-          surfaceTintColor: Colors.transparent, // ←色変化防止
-          elevation: 0,
-          scrolledUnderElevation: 0,
-        ),
       ),
+
+      builder: (context, child) {
+        final media = MediaQuery.of(context);
+
+        // 現在のスケールを TextScaler 経由で取得
+        final currentScale = media.textScaler.scale(1.0);
+
+        // 上限・下限を適用
+        final clampedScale = currentScale.clamp(
+          _minTextScale,
+          _maxTextScale,
+        );
+
+        return MediaQuery(
+          data: media.copyWith(
+            textScaler: TextScaler.linear(clampedScale),
+          ),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
+
       home: const AuthGate(),
       debugShowCheckedModeBanner: false,
     );
@@ -364,20 +381,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           _buildStatusIndicator(
                             Icons.error,
                             Colors.red,
-                            '期限切れ',
-                            expiredCount,
+                            '超過',
+                            expiredCount > 999 ? '999+' : '$expiredCount', // 文字列として渡す
                           ),
                           _buildStatusIndicator(
                             Icons.warning,
                             Colors.amber,
                             'もうすぐ',
-                            soonCount,
+                            soonCount > 999 ? '999+' : '$soonCount', // 文字列として渡す
                           ),
                           _buildStatusIndicator(
                             Icons.check_circle,
                             Colors.green,
-                            '余裕あり',
-                            safeCount,
+                            '',
+                            safeCount > 999 ? '999+' : '$safeCount', // 文字列として渡す
                           ),
                         ],
                       ),
@@ -465,8 +482,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                       label: '元に戻す',
                                       onPressed: () async {
                                         try {
-                                          final currentUser = FirebaseAuth
-                                              .instance.currentUser;
+                                          final currentUser =
+                                              FirebaseAuth.instance
+                                                  .currentUser;
                                           await _db
                                               .collection('shops')
                                               .doc(shopId)
@@ -607,47 +625,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 '期限切れ',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  fontSize: 16,
+                  fontSize: 14, // 16から少し下げるとより安全です
                   fontWeight: FontWeight.bold,
                   color: Colors.black,
                 ),
               )
-                  : Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text(
-                    '残り',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.black,
+                  : FittedBox(
+                // ← 追加：中身がはみ出そうな場合に自動で縮小させる
+                fit: BoxFit.scaleDown,
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min, // ← 追加：必要最小限のサイズに
+                  children: [
+                    const Text(
+                      '残り',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text.rich(
-                    TextSpan(
-                      children: [
-                        TextSpan(
-                          text: mainNumberText,
-                          style: const TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black,
+                    const SizedBox(height: 2),
+                    Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: mainNumberText,
+                            style: const TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.black,
+                            ),
                           ),
-                        ),
-                        TextSpan(
-                          text: unitText,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.black,
+                          TextSpan(
+                            text: unitText,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.black,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -705,14 +728,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       IconData icon,
       Color color,
       String label,
-      int count,
+      String countText, // ← int count から String countText に変更
       ) {
     return Row(
       children: [
         Icon(icon, color: color, size: 22),
         const SizedBox(width: 4),
         Text(
-          '$count',
+          countText, // ← $count から countText に変更
           style: TextStyle(
             color: color,
             fontWeight: FontWeight.bold,

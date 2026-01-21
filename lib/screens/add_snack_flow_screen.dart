@@ -47,6 +47,12 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   String? _ocrNormalizedForDebug;
   DateTime? _ocrParsedForDebug;
 
+  // ===== JANマスタ取得結果（SnackBarではなく画面上に表示する）=====
+  bool _isLoadingJanMaster = false;
+  String? _janMasterErrorMessage;
+  String? _masterName;
+  int? _masterPrice;
+
   // 賞味期限（プルダウン＋カレンダー用）
   int? _selectedYear;
   int? _selectedMonth;
@@ -76,11 +82,43 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     _selectedDay = date.day;
   }
 
+  void _resetForRescan() {
+    setState(() {
+      _step = AddSnackStep.scanBarcode;
+      _isScanningBarcode = true;
+
+      _janCode = null;
+
+      // 期限撮影/OCR周り
+      _isRunningOcr = false;
+      _ocrRawText = null;
+      _ocrErrorMessage = null;
+      _expiryImage = null;
+
+      // デバッグ
+      _ocrNormalizedForDebug = null;
+      _ocrParsedForDebug = null;
+
+      // マスタ取得周り
+      _isLoadingJanMaster = false;
+      _janMasterErrorMessage = null;
+      _masterName = null;
+      _masterPrice = null;
+
+      // 入力値（JANから再スタートなので一旦クリア）
+      _nameController.text = '';
+      _priceController.text = '';
+
+      // 期限選択もクリア
+      _selectedYear = null;
+      _selectedMonth = null;
+      _selectedDay = null;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // ここはデフォルト(true)のまま：キーボード表示時に body の高さが縮み、
-      // 下部のボタン列（editDetailsで表示）が自動的にキーボードの上に来る。
       resizeToAvoidBottomInset: true,
       appBar: AppBar(
         title: const Text('商品を追加'),
@@ -140,14 +178,15 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
               setState(() {
                 _janCode = rawValue;
                 _step = AddSnackStep.captureExpiry;
+
+                // 直前の状態をクリア（再スキャン等の混線防止）
+                _janMasterErrorMessage = null;
+                _masterName = null;
+                _masterPrice = null;
               });
 
-              // Firestore 上の JAN マスタから、商品名・売価を自動入力する
+              // Firestore 上の JAN マスタから、商品名・売価を取得（SnackBarは出さない）
               _loadJanMasterForJanCode(rawValue);
-
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('JANコードを取得しました: $rawValue')),
-              );
             },
           ),
         ),
@@ -167,6 +206,12 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                     _isScanningBarcode = false;
                     _janCode = null;
                     _step = AddSnackStep.captureExpiry;
+
+                    // マスタも無し
+                    _isLoadingJanMaster = false;
+                    _janMasterErrorMessage = null;
+                    _masterName = null;
+                    _masterPrice = null;
                   });
                 },
                 child: const Text('バーコード読み取りをスキップする'),
@@ -180,8 +225,19 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
   // 2. 賞味期限撮影＋OCRステップ
   //
-  // 撮影→OCR終了後、そのまま商品情報入力画面（editDetails）へ遷移。
+  // - JANコードがマスタ登録済みなら、この画面で商品名・売価を表示する
+  // - 「バーコードをもう一度スキャンする」ボタンで最初に戻れる
   Widget _buildCaptureExpiryStep(BuildContext context) {
+    final hasJan = _janCode != null && _janCode!.trim().isNotEmpty;
+    final hasMaster = (_masterName != null && _masterName!.trim().isNotEmpty) || (_masterPrice != null);
+
+    final valueNameStyle = Theme.of(context).textTheme.titleLarge?.copyWith(
+      fontWeight: FontWeight.w700,
+    );
+    final valuePriceStyle = Theme.of(context).textTheme.titleLarge?.copyWith(
+      fontWeight: FontWeight.w700,
+    );
+
     return SingleChildScrollView(
       key: const ValueKey('capture_expiry'),
       padding: const EdgeInsets.all(16),
@@ -199,8 +255,105 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: 16),
-          if (_expiryImage != null)
+          const SizedBox(height: 12),
+          if (hasJan) ...[
+            Text(
+              'JANコード',
+              style: Theme.of(context).textTheme.labelMedium,
+            ),
+            const SizedBox(height: 4),
+            SelectableText(
+              _janCode!,
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          // ===== マスタ取得結果（画面表示）=====
+          if (hasJan) ...[
+            if (_isLoadingJanMaster) ...[
+              Row(
+                children: [
+                  const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'マスタから商品情報を取得しています…',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ] else if (_janMasterErrorMessage != null) ...[
+              Text(
+                _janMasterErrorMessage!,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 8),
+            ] else if (hasMaster) ...[
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  color: Theme.of(context).colorScheme.surfaceVariant,
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'マスタから取得した商品情報',
+                      style: Theme.of(context).textTheme.labelLarge,
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      '商品名',
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      (_masterName != null && _masterName!.trim().isNotEmpty) ? _masterName! : '（未登録）',
+                      style: valueNameStyle,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      '売価',
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _masterPrice != null ? '${_masterPrice!}円' : '（未登録）',
+                      style: valuePriceStyle,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ],
+
+          // バーコード再スキャン
+          if (hasJan) ...[
+            OutlinedButton.icon(
+              onPressed: _isRunningOcr ? null : _resetForRescan,
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('バーコードをもう一度スキャンする'),
+            ),
+            const SizedBox(height: 12),
+          ],
+
+          // 撮影済みのときだけ画像を表示する（プレースホルダーは出さない）
+          if (_expiryImage != null) ...[
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: AspectRatio(
@@ -215,23 +368,12 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                   fit: BoxFit.cover,
                 ),
               ),
-            )
-          else
-            Container(
-              height: 220,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                ),
-              ),
-              alignment: Alignment.center,
-              child: const Text(
-                'まだ画像がありません。\n「カメラを起動して撮影する」を押してください。',
-                textAlign: TextAlign.center,
-              ),
             ),
-          const SizedBox(height: 16),
+            const SizedBox(height: 16),
+          ] else ...[
+            const SizedBox(height: 8),
+          ],
+
           if (_isRunningOcr)
             const Center(
               child: Padding(
@@ -250,7 +392,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
               const SizedBox(height: 8),
             ],
           ],
-          const SizedBox(height: 24),
+          const SizedBox(height: 16),
           FilledButton.icon(
             onPressed: _isRunningOcr ? null : _onTapCaptureExpiry,
             icon: const Icon(Icons.camera_alt_outlined),
@@ -267,6 +409,9 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                 _step = AddSnackStep.editDetails;
                 _ocrErrorMessage = 'OCRをスキップしたため、賞味期限は手動で選択してください。';
               });
+
+              // マスタ取得済みなら、編集画面の入力欄へ「空欄の場合のみ」反映しておく
+              _applyMasterToControllersIfEmpty();
             },
             child: const Text('OCRを使わずに手入力する'),
           ),
@@ -277,12 +422,15 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
   // 3. 商品名／賞味期限／売価の入力ステップ
   //
-  // ここが今回の修正ポイント：
-  // - ボタン列（キャンセル/商品を追加）をスクロール領域の外に出し、
-  //   キーボード表示時でも常に押せるようにする。
-  // - その代わり、フォームは Expanded + ScrollView で自然にスクロール可能にする。
+  // ここだけ変更：指定の要素の文字サイズを少し大きくする
   Widget _buildEditDetailsStep(BuildContext context) {
     final now = DateTime.now();
+
+    // ========= 文字サイズ調整（本体設定のTextScaleFactor制御は今回はしない） =========
+    const double _fieldFontSize = 18; // TextFormField の入力文字
+    const double _labelFontSize = 16; // TextFormFieldのラベル
+    const double _buttonFontSize = 16; // カレンダー/再撮影ボタン
+    const double _buttonIconSize = 22;
 
     // 年リストは「選択値が items に存在しない」事故を避けるため、選択年を必ず含む範囲にする。
     // OCR誤認識で極端な年が出た場合にDropdownが落ちないように、現実的な範囲でガードする。
@@ -334,6 +482,20 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       parsedLabel = '$y-$m-$d';
     }
 
+    final inputTextStyle = Theme.of(context).textTheme.bodyLarge?.copyWith(
+      fontSize: _fieldFontSize,
+    );
+    final labelTextStyle = Theme.of(context).textTheme.labelLarge?.copyWith(
+      fontSize: _labelFontSize,
+    );
+
+    final buttonStyle = TextButton.styleFrom(
+      textStyle: Theme.of(context).textTheme.titleMedium?.copyWith(
+        fontSize: _buttonFontSize,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+
     return Column(
       key: const ValueKey('edit_details'),
       children: [
@@ -363,11 +525,15 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                       ),
                       const SizedBox(height: 16),
                     ],
+
+                    // 商品名（少し大きく）
                     TextFormField(
                       controller: _nameController,
-                      decoration: const InputDecoration(
+                      style: inputTextStyle,
+                      decoration: InputDecoration(
                         labelText: '商品名',
                         hintText: '例）うまい棒 めんたい味',
+                        labelStyle: labelTextStyle,
                       ),
                       textInputAction: TextInputAction.next,
                       validator: (value) {
@@ -377,12 +543,15 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                         return null;
                       },
                     ),
+
                     const SizedBox(height: 24),
+
                     Text(
                       '賞味期限',
                       style: Theme.of(context).textTheme.labelLarge,
                     ),
                     const SizedBox(height: 4),
+
                     if (_ocrErrorMessage != null) ...[
                       Text(
                         _ocrErrorMessage!,
@@ -394,8 +563,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                       const SizedBox(height: 4),
                     ],
 
-                    // ===== ここだけ追加：編集画面でOCRデバッグを見えるようにする =====
-                    // kDebugMode の時だけ表示（リリースでは出ません）
                     if (kDebugMode && (_ocrRawText != null)) ...[
                       const SizedBox(height: 8),
                       ExpansionTile(
@@ -441,19 +608,22 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                         Expanded(
                           child: DropdownButtonFormField<int>(
                             key: const ValueKey('year_dropdown'),
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               labelText: '年',
+                              labelStyle: labelTextStyle,
                             ),
                             items: years
                                 .map(
                                   (y) => DropdownMenuItem<int>(
                                 value: y,
-                                child: Text('$y年'),
+                                child: Text(
+                                  '$y年',
+                                  style: inputTextStyle,
+                                ),
                               ),
                             )
                                 .toList(),
-                            initialValue:
-                            _selectedYear != null && years.contains(_selectedYear) ? _selectedYear : null,
+                            initialValue: _selectedYear != null && years.contains(_selectedYear) ? _selectedYear : null,
                             onChanged: (value) {
                               setState(() {
                                 _selectedYear = value;
@@ -477,14 +647,18 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                         Expanded(
                           child: DropdownButtonFormField<int>(
                             key: const ValueKey('month_dropdown'),
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               labelText: '月',
+                              labelStyle: labelTextStyle,
                             ),
                             items: months
                                 .map(
                                   (m) => DropdownMenuItem<int>(
                                 value: m,
-                                child: Text('$m月'),
+                                child: Text(
+                                  '$m月',
+                                  style: inputTextStyle,
+                                ),
                               ),
                             )
                                 .toList(),
@@ -512,14 +686,18 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                         Expanded(
                           child: DropdownButtonFormField<int>(
                             key: const ValueKey('day_dropdown'),
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               labelText: '日',
+                              labelStyle: labelTextStyle,
                             ),
                             items: days
                                 .map(
                                   (d) => DropdownMenuItem<int>(
                                 value: d,
-                                child: Text('$d日'),
+                                child: Text(
+                                  '$d日',
+                                  style: inputTextStyle,
+                                ),
                               ),
                             )
                                 .toList(),
@@ -539,30 +717,43 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                         ),
                       ],
                     ),
+
                     const SizedBox(height: 8),
+
+                    // カレンダーから日付を入力ボタン（少し大きく）
                     Align(
                       alignment: Alignment.centerLeft,
                       child: TextButton.icon(
+                        style: buttonStyle,
                         onPressed: () => _onTapSelectDateWithCalendar(context),
-                        icon: const Icon(Icons.calendar_today),
+                        icon: Icon(Icons.calendar_today, size: _buttonIconSize),
                         label: const Text('カレンダーから選択'),
                       ),
                     ),
+
                     const SizedBox(height: 8),
+
+                    // 賞味期限をもう一度撮影ボタン（少し大きく）
                     Align(
                       alignment: Alignment.centerLeft,
                       child: TextButton.icon(
+                        style: buttonStyle,
                         onPressed: _isRunningOcr ? null : _onTapCaptureExpiry,
-                        icon: const Icon(Icons.camera_alt_outlined),
+                        icon: Icon(Icons.camera_alt_outlined, size: _buttonIconSize),
                         label: const Text('賞味期限をもう一度撮影する'),
                       ),
                     ),
+
                     const SizedBox(height: 8),
+
+                    // 売価（少し大きく）
                     TextFormField(
                       controller: _priceController,
-                      decoration: const InputDecoration(
+                      style: inputTextStyle,
+                      decoration: InputDecoration(
                         labelText: '売価（円）',
                         hintText: '例）30',
+                        labelStyle: labelTextStyle,
                       ),
                       keyboardType: TextInputType.number,
                       textInputAction: TextInputAction.done,
@@ -581,6 +772,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                         _onSubmit();
                       },
                     ),
+
                     const SizedBox(height: 24),
                     const SizedBox(height: 8),
                   ],
@@ -743,12 +935,14 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
           _applyExpiryFromDate(parsed);
           _ocrErrorMessage = null;
         } else {
-          _ocrErrorMessage =
-          '賞味期限の日付を自動で特定できませんでした。プルダウンまたはカレンダーから選択してください。';
+          _ocrErrorMessage = '賞味期限の日付を自動で特定できませんでした。プルダウンまたはカレンダーから選択してください。';
         }
       });
 
       if (!mounted) return;
+
+      // ここで編集画面に進む前に、マスタ取得済みなら入力欄へ反映しておく（空欄の場合のみ）
+      _applyMasterToControllersIfEmpty();
 
       // 撮影後は確認画面を挟まず、そのまま商品情報入力画面へ。
       setState(() {
@@ -762,6 +956,24 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     }
   }
 
+  void _applyMasterToControllersIfEmpty() {
+    if (!mounted) return;
+
+    final name = _masterName;
+    final price = _masterPrice;
+
+    if (name != null && name.trim().isNotEmpty) {
+      if (_nameController.text.trim().isEmpty) {
+        _nameController.text = name;
+      }
+    }
+    if (price != null) {
+      if (_priceController.text.trim().isEmpty) {
+        _priceController.text = price.toString();
+      }
+    }
+  }
+
   // 「商品を追加」押下時
   Future<void> _onSubmit() async {
     FocusScope.of(context).unfocus();
@@ -772,9 +984,9 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
     final DateTime? expiry = _buildSelectedExpiry();
     if (expiry == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('賞味期限を選択してください。')),
-      );
+      setState(() {
+        _ocrErrorMessage = '賞味期限を選択してください。';
+      });
       return;
     }
 
@@ -785,9 +997,9 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     if (priceText.isNotEmpty) {
       price = int.tryParse(priceText.replaceAll(',', ''));
       if (price == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('売価には数値を入力してください。')),
-        );
+        setState(() {
+          _ocrErrorMessage = '売価には数値を入力してください。';
+        });
         return;
       }
     }
@@ -799,7 +1011,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       price: price,
     );
 
-    // JANコードがある場合は、JANマスタを更新（最後に入力した値として保存）
     await _updateJanMasterIfNeeded(snack);
 
     if (!mounted) return;
@@ -807,31 +1018,44 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   /// JANコードに対応する JAN マスタ情報を読み込み、
-  /// 商品名・売価の入力欄を自動補完する。
+  /// 取得結果は SnackBar ではなく画面上に表示する。
   Future<void> _loadJanMasterForJanCode(String janCode) async {
+    setState(() {
+      _isLoadingJanMaster = true;
+      _janMasterErrorMessage = null;
+      _masterName = null;
+      _masterPrice = null;
+    });
+
     try {
       final repo = ref.read(janMasterRepositoryProvider);
       final entry = await repo.fetchJan(janCode);
 
-      if (!mounted || entry == null) return;
+      if (!mounted) return;
+
+      if (entry == null) {
+        setState(() {
+          _isLoadingJanMaster = false;
+          _janMasterErrorMessage = null;
+          _masterName = null;
+          _masterPrice = null;
+        });
+        return;
+      }
 
       setState(() {
-        if (_nameController.text.trim().isEmpty) {
-          _nameController.text = entry.name;
-        }
-        if (entry.price != null) {
-          _priceController.text = entry.price.toString();
-        }
+        _isLoadingJanMaster = false;
+        _masterName = entry.name;
+        _masterPrice = entry.price;
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('過去の登録データを読み込みました')),
-      );
+      _applyMasterToControllersIfEmpty();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('JANマスタの読み込みに失敗しました: $e')),
-      );
+      setState(() {
+        _isLoadingJanMaster = false;
+        _janMasterErrorMessage = 'マスタの読み込みに失敗しました: $e';
+      });
     }
   }
 
@@ -851,36 +1075,19 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
         price: snack.price,
         userId: user?.uid ?? 'anonymous',
       );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('JANマスタの更新に失敗しました: $e')),
-      );
+    } catch (_) {
+      // SnackBar禁止のため黙って握りつぶす（必要ならどこかにログ/画面内表示へ）
     }
   }
 
-  // OCR結果のテキストから日付っぽい部分を抜き出してDateTimeにする
-  //
-  // なるべく多くのケースを拾うための方針:
-  // - OCR表示用テキスト(_ocrRawText)は一切加工しない（デバッグに必要）
-  // - パース用だけ別に正規化し、誤認識文字を数字に補正する
-  //
-  // 対応強化:
-  // - "2026 / 1/ 30" のような空白混入
-  // - "2026 4" / "Z026, 4" のように区切りが消える・誤認識するケース（年月のみ→月末扱い）
-  // - 1 が I/l、2 が Z、0 が O になる等の誤認識をパース時のみ補正
   DateTime? _tryParseExpiryFromText(String text) {
     final now = DateTime.now();
 
-    // まず正規化（区切りは空白へ、数字と英字と空白を残す）
     final normalized = _normalizeOcrTextForParse(text);
-
-    // 誤認識補正（パース用だけ）
     final fixed = _fixDigits(normalized);
 
     final candidates = <DateTime>[];
 
-    // 1) 連続8桁: YYYYMMDD
     for (final m in RegExp(r'\b(\d{4})(\d{2})(\d{2})\b').allMatches(fixed)) {
       final year = int.tryParse(m.group(1)!);
       final month = int.tryParse(m.group(2)!);
@@ -892,7 +1099,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       }
     }
 
-    // 2) 連続6桁: YYMMDD → 20YY
     for (final m in RegExp(r'\b(\d{2})(\d{2})(\d{2})\b').allMatches(fixed)) {
       final yy = int.tryParse(m.group(1)!);
       final month = int.tryParse(m.group(2)!);
@@ -905,7 +1111,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       }
     }
 
-    // 3) 空白区切り: YYYY M D（"2026 / 1/ 30" → "2026 1 30"）
     for (final m in RegExp(r'\b(\d{4})\s+(\d{1,2})\s+(\d{1,2})\b').allMatches(fixed)) {
       final year = int.tryParse(m.group(1)!);
       final month = int.tryParse(m.group(2)!);
@@ -917,7 +1122,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       }
     }
 
-    // 4) 空白区切り: YY M D → 20YY
     for (final m in RegExp(r'\b(\d{2})\s+(\d{1,2})\s+(\d{1,2})\b').allMatches(fixed)) {
       final yy = int.tryParse(m.group(1)!);
       final month = int.tryParse(m.group(2)!);
@@ -930,7 +1134,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       }
     }
 
-    // 5) 年月だけ（YYYY M）→ 月末扱い（"2026 4" / "Z026, 4" → "2026 4"）
     for (final m in RegExp(r'\b(\d{4})\s+(\d{1,2})\b').allMatches(fixed)) {
       final year = int.tryParse(m.group(1)!);
       final month = int.tryParse(m.group(2)!);
@@ -943,7 +1146,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       }
     }
 
-    // 6) 年月だけ（YY M）→ 20YY + 月末
     for (final m in RegExp(r'\b(\d{2})\s+(\d{1,2})\b').allMatches(fixed)) {
       final yy = int.tryParse(m.group(1)!);
       final month = int.tryParse(m.group(2)!);
@@ -959,15 +1161,11 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
     if (candidates.isEmpty) return null;
 
-    // 複数候補がある場合、"今に近い将来" を優先（ただし過去も近ければ拾う）
     candidates.sort((a, b) => _expiryScore(a, now).compareTo(_expiryScore(b, now)));
     return candidates.first;
   }
 
   String _normalizeOcrTextForParse(String text) {
-    // 年/月/日 などの日本語表記も混ざるので空白へ
-    // 区切り候補（/ . - , 全角）も空白へ
-    // 数字・英字・空白のみ残して、それ以外は空白へ（Zなどを消さない）
     final s = text
         .replaceAll('年', ' ')
         .replaceAll('月', ' ')
@@ -981,8 +1179,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   String _fixDigits(String s) {
-    // パース用だけ誤認識を数字に寄せる（表示用テキストはそのまま）
-    // 例: Z026 → 2026, I/ l → 1, O → 0
     final upper = s.toUpperCase();
 
     const map = <String, String>{
@@ -1006,22 +1202,16 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   bool _isPlausibleExpiry(DateTime dt, DateTime now) {
-    // 駄菓子の賞味期限は多くが近〜中期（とはいえ例外もある）なので、
-    // 極端に遠い/古すぎるものは誤認識の可能性が高いとして弾く。
-    // - 過去: 10年より古いのは基本ありえない
-    // - 未来: 30年より先は基本ありえない
     final min = DateTime(now.year - 10, 1, 1);
     final max = DateTime(now.year + 30, 12, 31);
     return !dt.isBefore(min) && !dt.isAfter(max);
   }
 
   int _expiryScore(DateTime dt, DateTime now) {
-    // 将来の近い日付を優先しつつ、過去でも近ければ次点にする。
     final diffDays = dt.difference(now).inDays;
     if (diffDays >= 0) {
       return diffDays;
     }
-    // 過去は少しペナルティを付ける（期限切れ商品もあり得るので完全排除しない）
     return 100000 + diffDays.abs();
   }
 
@@ -1037,7 +1227,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     }
   }
 
-  /// 与えられた [year], [month] の月末日（28〜31 のいずれか）を返す。
   int _lastDayOfMonth(int year, int month) {
     final lastDate = DateTime(year, month + 1, 0);
     return lastDate.day;
