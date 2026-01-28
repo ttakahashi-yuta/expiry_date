@@ -40,7 +40,6 @@ class ExpiryDateApp extends StatelessWidget {
         useMaterial3: true,
         colorSchemeSeed: Colors.orange,
       ),
-
       builder: (context, child) {
         final media = MediaQuery.of(context);
 
@@ -60,7 +59,6 @@ class ExpiryDateApp extends StatelessWidget {
           child: child ?? const SizedBox.shrink(),
         );
       },
-
       home: const AuthGate(),
       debugShowCheckedModeBanner: false,
     );
@@ -148,6 +146,12 @@ class AuthGate extends ConsumerWidget {
   }
 }
 
+enum _SortKey {
+  expiry,
+  name,
+  price,
+}
+
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
@@ -165,6 +169,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final ValueNotifier<String> _searchQuery = ValueNotifier<String>('');
 
   // =======================
+  // 並び替え
+  // =======================
+  _SortKey _sortKey = _SortKey.expiry;
+  bool _sortAscending = true; // デフォルトは全て「昇順」
+
+  // メニューをボタンの上に出すためのキー
+  final GlobalKey _sortButtonKey = GlobalKey();
+
+  // =======================
   // Flicker対策：Streamの再生成を止める
   // =======================
   String? _snacksStreamShopId;
@@ -174,11 +187,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Stream<QuerySnapshot<Map<String, dynamic>>> _getSnacksStream(String shopId) {
     if (_snacksStream == null || _snacksStreamShopId != shopId) {
       _snacksStreamShopId = shopId;
-      _snacksStream = _db
-          .collection('shops')
-          .doc(shopId)
-          .collection('snacks')
-          .snapshots();
+      _snacksStream = _db.collection('shops').doc(shopId).collection('snacks').snapshots();
     }
     return _snacksStream!;
   }
@@ -189,6 +198,250 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     _searchFocusNode.dispose();
     _searchQuery.dispose();
     super.dispose();
+  }
+
+  String _arrowMark(bool ascending) => ascending ? '▲' : '▼';
+
+  String _sortKeyShortLabel(_SortKey key) {
+    switch (key) {
+      case _SortKey.expiry:
+        return '期限';
+      case _SortKey.name:
+        return '名前';
+      case _SortKey.price:
+        return '売価';
+    }
+  }
+
+  String _sortKeyMenuLabel(_SortKey key) {
+    switch (key) {
+      case _SortKey.expiry:
+        return '期限順';
+      case _SortKey.name:
+        return '名前順';
+      case _SortKey.price:
+        return '売価順';
+    }
+  }
+
+  String _currentSortTitleSuffix() {
+    return '${_sortKeyShortLabel(_sortKey)}${_arrowMark(_sortAscending)}';
+  }
+
+  void _applySortSelection(_SortKey key) {
+    if (!mounted) return;
+    setState(() {
+      if (_sortKey == key) {
+        _sortAscending = !_sortAscending; // 同じ項目を選んだらトグル
+      } else {
+        _sortKey = key;
+        _sortAscending = true; // 切替時はデフォルト方向（昇順）
+      }
+    });
+  }
+
+  void _sortEntries(List<_SnackDocEntry> entries) {
+    int compareByName(_SnackDocEntry a, _SnackDocEntry b) {
+      final an = a.snack.name.trim().toLowerCase();
+      final bn = b.snack.name.trim().toLowerCase();
+      final c = an.compareTo(bn);
+      if (c != 0) return c;
+      final ce = a.snack.expiry.compareTo(b.snack.expiry);
+      if (ce != 0) return ce;
+      return a.docId.compareTo(b.docId);
+    }
+
+    int compareByExpiry(_SnackDocEntry a, _SnackDocEntry b) {
+      final c = a.snack.expiry.compareTo(b.snack.expiry);
+      if (c != 0) return c;
+      final cn = compareByName(a, b);
+      if (cn != 0) return cn;
+      return a.docId.compareTo(b.docId);
+    }
+
+    int compareByPrice(_SnackDocEntry a, _SnackDocEntry b) {
+      final ap = a.snack.price;
+      final bp = b.snack.price;
+
+      // null（未設定）は常に最後に寄せる
+      if (ap == null && bp == null) {
+        return compareByName(a, b);
+      }
+      if (ap == null) return 1;
+      if (bp == null) return -1;
+
+      final c = ap.compareTo(bp);
+      if (c != 0) return c;
+      return compareByName(a, b);
+    }
+
+    int baseCompare(_SnackDocEntry a, _SnackDocEntry b) {
+      switch (_sortKey) {
+        case _SortKey.expiry:
+          return compareByExpiry(a, b);
+        case _SortKey.name:
+          return compareByName(a, b);
+        case _SortKey.price:
+          return compareByPrice(a, b);
+      }
+    }
+
+    entries.sort((a, b) {
+      final c = baseCompare(a, b);
+
+      if (_sortKey == _SortKey.price) {
+        // 価格の null は常に最後に寄せたいので、null絡みの順位だけは逆転させない
+        final ap = a.snack.price;
+        final bp = b.snack.price;
+        final involvesNull = (ap == null) || (bp == null);
+        if (involvesNull) {
+          return c;
+        }
+      }
+
+      return _sortAscending ? c : -c;
+    });
+  }
+
+  Future<void> _openSortPopup(BuildContext context) async {
+    final keyContext = _sortButtonKey.currentContext;
+    if (keyContext == null) return;
+
+    final renderObject = keyContext.findRenderObject();
+    if (renderObject is! RenderBox) return;
+
+    final box = renderObject;
+    final pos = box.localToGlobal(Offset.zero);
+    final size = box.size;
+
+    final screenSize = MediaQuery.of(context).size;
+    final topPadding = MediaQuery.of(context).padding.top;
+
+    const double menuWidth = 220;
+    const double itemHeight = 48;
+    const double menuVPadding = 6;
+    const double menuGap = 8;
+    const double edgeMargin = 8;
+
+    final double menuHeight = (menuVPadding * 2) + (itemHeight * 3);
+
+    // 右揃え（ボタンの右端に合わせる）
+    double left = (pos.dx + size.width) - menuWidth;
+    left = left.clamp(edgeMargin, screenSize.width - menuWidth - edgeMargin);
+
+    // 原則「ボタンの上」に出す
+    double top = pos.dy - menuHeight - menuGap;
+
+    // 上が足りない場合だけ下に逃がす（最小限）
+    if (top < topPadding + edgeMargin) {
+      top = pos.dy + size.height + menuGap;
+    }
+
+    // 画面外に出ないように最終クランプ
+    if (top + menuHeight > screenSize.height - edgeMargin) {
+      top = (screenSize.height - menuHeight - edgeMargin);
+      if (top < topPadding + edgeMargin) {
+        top = topPadding + edgeMargin;
+      }
+    }
+
+    await showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'sort_menu',
+      barrierColor: Colors.transparent, // 暗くしない
+      pageBuilder: (ctx, anim1, anim2) {
+        var localKey = _sortKey;
+        var localAsc = _sortAscending;
+
+        Widget buildTile({
+          required _SortKey key,
+          required IconData icon,
+        }) {
+          final selected = localKey == key;
+          final shownArrow = selected ? _arrowMark(localAsc) : _arrowMark(true);
+
+          return InkWell(
+            onTap: () {
+              // ダイアログ内表示用
+              if (selected) {
+                localAsc = !localAsc;
+              } else {
+                localKey = key;
+                localAsc = true;
+              }
+
+              // 本体の状態も更新
+              _applySortSelection(key);
+
+              // ダイアログのUI更新（閉じない）
+              (ctx as Element).markNeedsBuild();
+            },
+            child: SizedBox(
+              height: itemHeight,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: Row(
+                  children: [
+                    Icon(icon, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _sortKeyMenuLabel(key),
+                        style: const TextStyle(fontSize: 15),
+                      ),
+                    ),
+                    Text(
+                      shownArrow,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (selected) const Icon(Icons.check, size: 18),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+
+        return Stack(
+          children: [
+            Positioned(
+              left: left,
+              top: top,
+              width: menuWidth,
+              child: Material(
+                elevation: 10,
+                borderRadius: BorderRadius.circular(12),
+                clipBehavior: Clip.antiAlias,
+                color: Colors.white,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: menuVPadding),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      buildTile(key: _SortKey.expiry, icon: Icons.event_outlined),
+                      buildTile(key: _SortKey.name, icon: Icons.sort_by_alpha),
+                      buildTile(key: _SortKey.price, icon: Icons.payments_outlined),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+      transitionBuilder: (ctx, anim, sec, child) {
+        final curved = CurvedAnimation(parent: anim, curve: Curves.easeOut);
+        return FadeTransition(
+          opacity: curved,
+          child: child,
+        );
+      },
+    );
   }
 
   @override
@@ -203,9 +456,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         backgroundColor: Colors.white,
         foregroundColor: Colors.black87,
         elevation: 0,
-        title: const Text(
-          '在庫一覧（賞味期限順）',
-          style: TextStyle(fontWeight: FontWeight.w600),
+        title: Text(
+          '在庫一覧（${_currentSortTitleSuffix()}）',
+          style: const TextStyle(fontWeight: FontWeight.w600),
         ),
         actions: [
           PopupMenuButton<String>(
@@ -213,8 +466,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               switch (value) {
                 case 'shop':
                   Navigator.of(context).push(
-                    MaterialPageRoute(
-                        builder: (_) => const ShopSelectionScreen()),
+                    MaterialPageRoute(builder: (_) => const ShopSelectionScreen()),
                   );
                   break;
                 case 'settings':
@@ -329,10 +581,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               );
             }).toList();
 
-            // 賞味期限順にソート（元リスト）
-            allEntries.sort(
-                  (a, b) => a.snack.expiry.compareTo(b.snack.expiry),
-            );
+            // 並び替え
+            _sortEntries(allEntries);
 
             // 検索クエリだけをトリガーに、リスト部分だけを再ビルド
             return ValueListenableBuilder<String>(
@@ -382,19 +632,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             Icons.error,
                             Colors.red,
                             '超過',
-                            expiredCount > 999 ? '999+' : '$expiredCount', // 文字列として渡す
+                            expiredCount > 999 ? '999+' : '$expiredCount',
                           ),
                           _buildStatusIndicator(
                             Icons.warning,
                             Colors.amber,
                             'もうすぐ',
-                            soonCount > 999 ? '999+' : '$soonCount', // 文字列として渡す
+                            soonCount > 999 ? '999+' : '$soonCount',
                           ),
                           _buildStatusIndicator(
                             Icons.check_circle,
                             Colors.green,
                             '',
-                            safeCount > 999 ? '999+' : '$safeCount', // 文字列として渡す
+                            safeCount > 999 ? '999+' : '$safeCount',
                           ),
                         ],
                       ),
@@ -415,8 +665,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                         itemBuilder: (context, index) {
                           final entry = filteredEntries[index];
                           final snack = entry.snack;
-                          final daysLeft =
-                              snack.expiry.difference(now).inDays;
+                          final daysLeft = snack.expiry.difference(now).inDays;
                           final isExpired = daysLeft < 0;
 
                           final Color backgroundColor;
@@ -445,8 +694,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                             ),
                             onDismissed: (direction) async {
                               try {
-                                final user =
-                                    FirebaseAuth.instance.currentUser;
+                                final user = FirebaseAuth.instance.currentUser;
                                 await _db
                                     .collection('shops')
                                     .doc(shopId)
@@ -454,11 +702,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                     .doc(entry.docId)
                                     .update({
                                   'isArchived': true,
-                                  'archivedAt':
-                                  FieldValue.serverTimestamp(),
+                                  'archivedAt': FieldValue.serverTimestamp(),
                                   'archivedByUserId': user?.uid,
-                                  'updatedAt':
-                                  FieldValue.serverTimestamp(),
+                                  'updatedAt': FieldValue.serverTimestamp(),
                                   'updatedByUserId': user?.uid,
                                 });
 
@@ -482,9 +728,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                       label: '元に戻す',
                                       onPressed: () async {
                                         try {
-                                          final currentUser =
-                                              FirebaseAuth.instance
-                                                  .currentUser;
+                                          final currentUser = FirebaseAuth.instance.currentUser;
                                           await _db
                                               .collection('shops')
                                               .doc(shopId)
@@ -494,27 +738,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                             'isArchived': false,
                                             'archivedAt': null,
                                             'archivedByUserId': null,
-                                            'updatedAt': FieldValue
-                                                .serverTimestamp(),
-                                            'updatedByUserId':
-                                            currentUser?.uid,
+                                            'updatedAt': FieldValue.serverTimestamp(),
+                                            'updatedByUserId': currentUser?.uid,
                                           });
                                         } catch (e) {
                                           if (!mounted) return;
-                                          scaffoldMessenger
-                                              .clearSnackBars();
+                                          scaffoldMessenger.clearSnackBars();
                                           scaffoldMessenger.showSnackBar(
                                             SnackBar(
-                                              content: Text(
-                                                '元に戻せませんでした: $e',
-                                              ),
+                                              content: Text('元に戻せませんでした: $e'),
                                             ),
                                           );
                                         }
                                       },
                                     ),
-                                    duration:
-                                    const Duration(seconds: 3),
+                                    duration: const Duration(seconds: 3),
                                   ),
                                 );
                               } catch (e) {
@@ -522,9 +760,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                 scaffoldMessenger.clearSnackBars();
                                 scaffoldMessenger.showSnackBar(
                                   SnackBar(
-                                    content: Text(
-                                      'ゴミ箱への移動に失敗しました: $e',
-                                    ),
+                                    content: Text('ゴミ箱への移動に失敗しました: $e'),
                                   ),
                                 );
                               }
@@ -570,14 +806,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 駄菓子カードUI
   Widget _buildSnackCard(SnackItem snack, int daysLeft, Color backgroundColor) {
     final bool isExpired = daysLeft < 0;
-    final String expiryText =
-    snack.expiry.toLocal().toString().split(' ')[0]; // yyyy-MM-dd 部分だけ
+    final String expiryText = snack.expiry.toLocal().toString().split(' ')[0]; // yyyy-MM-dd 部分だけ
 
     // 左ボックス用：背景色と同系色で少し濃い枠線色を計算
     final hsl = HSLColor.fromColor(backgroundColor);
-    final Color boxBorderColor = hsl
-        .withLightness((hsl.lightness - 0.15).clamp(0.0, 1.0))
-        .toColor();
+    final Color boxBorderColor =
+    hsl.withLightness((hsl.lightness - 0.15).clamp(0.0, 1.0)).toColor();
 
     // 残り日数の表示ロジック
     // 2年以上先なら「残り◯年」と年単位、それ以外は「残り◯日」
@@ -625,17 +859,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 '期限切れ',
                 textAlign: TextAlign.center,
                 style: TextStyle(
-                  fontSize: 14, // 16から少し下げるとより安全です
+                  fontSize: 14,
                   fontWeight: FontWeight.bold,
                   color: Colors.black,
                 ),
               )
                   : FittedBox(
-                // ← 追加：中身がはみ出そうな場合に自動で縮小させる
                 fit: BoxFit.scaleDown,
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.min, // ← 追加：必要最小限のサイズに
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     const Text(
                       '残り',
@@ -728,14 +961,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       IconData icon,
       Color color,
       String label,
-      String countText, // ← int count から String countText に変更
+      String countText,
       ) {
     return Row(
       children: [
         Icon(icon, color: color, size: 22),
         const SizedBox(width: 4),
         Text(
-          countText, // ← $count から countText に変更
+          countText,
           style: TextStyle(
             color: color,
             fontWeight: FontWeight.bold,
@@ -765,8 +998,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           children: [
             if (_isSearching)
               Padding(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 child: TextField(
                   controller: _searchController,
                   focusNode: _searchFocusNode,
@@ -788,8 +1020,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     isDense: true,
                   ),
                   onChanged: (value) {
-                    // 画面全体の setState は行わず、
-                    // 検索クエリだけを更新してリスト部分だけ再ビルドさせる
                     _searchQuery.value = value;
                   },
                 ),
@@ -825,18 +1055,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             icon: const Icon(Icons.search),
             onPressed: () {
               if (_isSearching) {
-                // 既に検索窓が開いている → 入力が空なら閉じる
                 if (_searchController.text.trim().isEmpty) {
                   setState(() {
                     _isSearching = false;
                   });
                   FocusScope.of(context).unfocus();
                 } else {
-                  // 入力がある間は閉じない → フォーカスだけ当て直す
                   FocusScope.of(context).requestFocus(_searchFocusNode);
                 }
               } else {
-                // 検索窓を開いてフォーカス＆キーボード表示
                 setState(() {
                   _isSearching = true;
                 });
@@ -858,14 +1085,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               );
 
               if (newItem != null) {
-                // Firestore に在庫データを保存
                 try {
                   final user = FirebaseAuth.instance.currentUser;
-                  await _db
-                      .collection('shops')
-                      .doc(shopId)
-                      .collection('snacks')
-                      .add({
+                  await _db.collection('shops').doc(shopId).collection('snacks').add({
                     'name': newItem.name,
                     'expiry': Timestamp.fromDate(newItem.expiry),
                     'janCode': newItem.janCode,
@@ -901,12 +1123,38 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
           ),
 
-          // 右：フィルタボタン
+          // 右：ソートボタン（押すと「上に」メニューが開く / 選んでも閉じない）
           IconButton(
-            icon: const Icon(Icons.filter_list),
-            onPressed: () {
-              // TODO: フィルタ機能を実装
-            },
+            key: _sortButtonKey,
+            onPressed: () => _openSortPopup(context),
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.sort),
+                Positioned(
+                  right: -4,
+                  bottom: -4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: Colors.grey.shade300,
+                        width: 0.8,
+                      ),
+                    ),
+                    child: Text(
+                      _arrowMark(_sortAscending),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
