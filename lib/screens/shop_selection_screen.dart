@@ -11,380 +11,246 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:expiry_date/core/shop/shop_repository.dart';
 import 'package:expiry_date/core/user/user_providers.dart';
 
-/// 新規ユーザーや、ショップ未選択のユーザーに対して、
-/// - 新しいショップを作成する（＝自分がオーナー）
-/// すでにショップが選択済みのユーザーに対して、
-/// - 店舗情報の確認
-/// - 招待QRの発行（オーナーのみ / 使い捨て / 24時間）
-/// - 招待QRの読み取り（参加）
-///
-/// この画面自体は「currentShopId を Firestore に書き込む」だけを担当し、
-/// 画面遷移（HomeScreen への遷移など）は親側（例: AuthGate）の責務とする。
+/// 店舗選択・管理画面
 class ShopSelectionScreen extends ConsumerStatefulWidget {
   const ShopSelectionScreen({super.key});
 
   @override
-  ConsumerState<ShopSelectionScreen> createState() =>
-      _ShopSelectionScreenState();
+  ConsumerState<ShopSelectionScreen> createState() => _ShopSelectionScreenState();
 }
 
 class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
-  final TextEditingController _newShopNameController = TextEditingController();
-
-  final _newShopFormKey = GlobalKey<FormState>();
-
-  bool _isCreatingShop = false;
-
-  bool _isGeneratingInvite = false;
+  // ローディング状態管理
+  bool _isGeneratinInvite = false;
   bool _isAcceptingInvite = false;
-
-  @override
-  void dispose() {
-    _newShopNameController.dispose();
-    super.dispose();
-  }
+  bool _isCreatingShop = false;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     final appUserAsync = ref.watch(appUserStreamProvider);
+    final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('店舗'),
-      ),
-      body: SafeArea(
-        child: appUserAsync.when(
-          data: (appUser) {
-            final currentShopId = appUser?.currentShopId;
+      appBar: AppBar(title: const Text('店舗設定')),
+      backgroundColor: theme.colorScheme.surface, // 背景色
+      body: appUserAsync.when(
+        data: (appUser) {
+          final currentShopId = appUser?.currentShopId;
+          final hasShop = currentShopId != null && currentShopId.trim().isNotEmpty;
 
-            return SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    'このアプリでは「店舗」単位で在庫を共有します。\n'
-                        'オーナーは招待QRを発行でき、招待を受ける側はQRを読み取って参加できます（招待QRは24時間・1回限り）。',
-                    style: theme.textTheme.bodyMedium,
-                  ),
-                  const SizedBox(height: 16),
-                  if (currentShopId != null && currentShopId.trim().isNotEmpty)
-                    _buildCurrentShopCard(context, theme, currentShopId.trim()),
-                  if (currentShopId != null && currentShopId.trim().isNotEmpty)
-                    const SizedBox(height: 16),
-                  if (currentShopId != null && currentShopId.trim().isNotEmpty)
-                    _buildInviteCard(context, theme, currentShopId.trim()),
-                  const SizedBox(height: 16),
-                  _buildAcceptInviteCard(context, theme),
-                  const SizedBox(height: 16),
-                  _buildCreateShopCard(context, theme),
-                  const SizedBox(height: 12),
-                  Text(
-                    '※ 招待QRは「24時間」有効で、「1回」使われると無効になります。\n'
-                        '※ 店舗の共有は権限（owner/member）により制御されます。',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
+          return ListView(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            children: [
+              // 1. 現在の店舗ヘッダー（店舗がある場合のみ）
+              if (hasShop) ...[
+                _buildCurrentShopHeader(context, currentShopId!),
+                const SizedBox(height: 24),
+              ],
+
+              // 2. 切り替え・参加アクション
+              _SectionHeader(title: 'アクション'),
+              // ★追加予定の「店舗切り替え」
+              ListTile(
+                leading: const Icon(Icons.swap_horiz),
+                title: const Text('店舗を切り替える'),
+                subtitle: const Text('参加済みの他の店舗へ移動します'),
+                trailing: const Chip(label: Text('準備中', style: TextStyle(fontSize: 10))),
+                enabled: false, // まだ押せない
+                onTap: () {
+                  // TODO: 店舗切り替えダイアログの実装
+                },
               ),
-            );
-          },
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(child: Text('ユーザー情報の取得に失敗しました: $e')),
-        ),
+              ListTile(
+                leading: const Icon(Icons.qr_code_scanner),
+                title: const Text('招待QRを読み取る'),
+                subtitle: const Text('カメラを起動して店舗に参加します'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: _isAcceptingInvite ? null : () => _onScanInviteQr(context),
+              ),
+              ListTile(
+                leading: const Icon(Icons.add_business),
+                title: const Text('新しい店舗を作成'),
+                subtitle: const Text('新しく店舗を作り、オーナーになります'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: _isCreatingShop ? null : () => _showCreateShopDialog(context),
+              ),
+
+              if (hasShop) ...[
+                const Divider(height: 32),
+                // 3. オーナー用メニュー
+                _SectionHeader(title: '現在の店舗の管理'),
+                _buildOwnerMenu(context, currentShopId),
+              ],
+            ],
+          );
+        },
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => Center(child: Text('エラー: $e')),
       ),
     );
   }
 
-  Widget _buildCurrentShopCard(
-      BuildContext context,
-      ThemeData theme,
-      String shopId,
-      ) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: theme.colorScheme.outlineVariant,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-          future:
-          FirebaseFirestore.instance.collection('shops').doc(shopId).get(),
-          builder: (context, snapshot) {
-            final shopName = snapshot.data?.data()?['name'] as String?;
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+  /// 現在の店舗情報を表示するカード
+  Widget _buildCurrentShopHeader(BuildContext context, String shopId) {
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        future: FirebaseFirestore.instance.collection('shops').doc(shopId).get(),
+        builder: (context, snapshot) {
+          final shopName = snapshot.data?.data()?['name'] as String? ?? '読み込み中...';
+
+          return Container(
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.primaryContainer,
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Row(
+                  children: [
+                    Icon(Icons.store, color: theme.colorScheme.onPrimaryContainer),
+                    const SizedBox(width: 8),
+                    Text(
+                      '現在の店舗',
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        color: theme.colorScheme.onPrimaryContainer,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
                 Text(
-                  '現在の店舗',
-                  style: theme.textTheme.titleMedium?.copyWith(
+                  shopName,
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    color: theme.colorScheme.onPrimaryContainer,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
                 const SizedBox(height: 8),
-                Text(
-                  shopName == null || shopName.trim().isEmpty
-                      ? '（店舗名未設定）'
-                      : shopName,
-                  style: theme.textTheme.bodyLarge?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Shop ID: $shopId',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                OutlinedButton.icon(
-                  onPressed: () async {
+                InkWell(
+                  onTap: () async {
                     await Clipboard.setData(ClipboardData(text: shopId));
-                    if (!mounted) return;
+                    if (!context.mounted) return;
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Shop ID をコピーしました')),
                     );
                   },
-                  icon: const Icon(Icons.copy),
-                  label: const Text('Shop ID をコピー'),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'ID: $shopId',
+                        style: TextStyle(
+                          color: theme.colorScheme.onPrimaryContainer.withOpacity(0.7),
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(Icons.copy, size: 14, color: theme.colorScheme.onPrimaryContainer.withOpacity(0.7)),
+                    ],
+                  ),
                 ),
               ],
-            );
-          },
-        ),
+            ),
+          );
+        },
       ),
     );
   }
 
-  Widget _buildInviteCard(
-      BuildContext context,
-      ThemeData theme,
-      String shopId,
-      ) {
+  /// オーナー向けメニュー（メンバーシップを確認して表示）
+  Widget _buildOwnerMenu(BuildContext context, String shopId) {
     final shopRepo = ref.read(shopRepositoryProvider);
 
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: theme.colorScheme.outlineVariant,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: StreamBuilder<ShopMember?>(
-          stream: shopRepo.watchMyMembership(shopId),
-          builder: (context, snapshot) {
-            final member = snapshot.data;
-            final isOwner = member?.role == 'owner';
+    return StreamBuilder<ShopMember?>(
+      stream: shopRepo.watchMyMembership(shopId),
+      builder: (context, snapshot) {
+        final member = snapshot.data;
+        final isOwner = member?.role == 'owner';
 
-            return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  '招待QRを発行（オーナーのみ）',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'この店舗に参加するための招待QRを作成します。\n'
-                      '招待QRは「24時間」有効で、「1回」使われると無効になります。',
-                  style: theme.textTheme.bodySmall,
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  height: 44,
-                  child: FilledButton.icon(
-                    onPressed: (!isOwner || _isGeneratingInvite)
-                        ? null
-                        : () => _onGenerateInviteQr(context, shopId),
-                    icon: _isGeneratingInvite
-                        ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                        : const Icon(Icons.qr_code_2),
-                    label: Text(
-                      _isGeneratingInvite ? '作成中...' : '招待QRを作成する',
-                    ),
-                  ),
-                ),
-                if (!isOwner) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    '※ 招待QRの発行はオーナーのみ可能です。',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ],
-            );
-          },
-        ),
-      ),
+        if (!isOwner) {
+          return const ListTile(
+            leading: Icon(Icons.lock_outline, color: Colors.grey),
+            title: Text('招待QRの発行', style: TextStyle(color: Colors.grey)),
+            subtitle: Text('オーナーのみ利用可能です'),
+          );
+        }
+
+        return ListTile(
+          leading: const Icon(Icons.qr_code_2),
+          title: const Text('招待QRを発行'),
+          subtitle: const Text('スタッフ招待用のQRコードを表示します'),
+          trailing: _isGeneratinInvite
+              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.chevron_right),
+          onTap: _isGeneratinInvite ? null : () => _onGenerateInviteQr(context, shopId),
+        );
+      },
     );
   }
 
-  Widget _buildAcceptInviteCard(BuildContext context, ThemeData theme) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: theme.colorScheme.outlineVariant,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              '招待QRで参加',
-              style: theme.textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'オーナーが表示している招待QRを読み取って、その店舗に参加します。\n'
-                  '参加後は currentShopId が更新され、在庫一覧が対象店舗に切り替わります。',
-              style: theme.textTheme.bodySmall,
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              height: 44,
-              child: OutlinedButton.icon(
-                onPressed:
-                _isAcceptingInvite ? null : () => _onScanInviteQr(context),
-                icon: _isAcceptingInvite
-                    ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-                    : const Icon(Icons.qr_code_scanner),
-                label: Text(_isAcceptingInvite ? '参加中...' : 'QRを読み取って参加する'),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  // ==========================================
+  // ロジック（ダイアログ表示など）
+  // ==========================================
 
-  Widget _buildCreateShopCard(BuildContext context, ThemeData theme) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: theme.colorScheme.outlineVariant,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Form(
-          key: _newShopFormKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                '新しい店舗を作成',
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '新しく店舗を作成し、作成者はオーナーになります。作成後、その店舗に切り替わります。',
-                style: theme.textTheme.bodySmall,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _newShopNameController,
-                decoration: const InputDecoration(
-                  labelText: '店舗名',
-                  hintText: '例）〇〇駄菓子店',
-                ),
-                textInputAction: TextInputAction.done,
-                validator: (value) {
-                  if (value == null || value.trim().isEmpty) {
-                    return '店舗名を入力してください';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                height: 44,
-                child: FilledButton.icon(
-                  onPressed:
-                  _isCreatingShop ? null : () => _onCreateNewShop(context),
-                  icon: _isCreatingShop
-                      ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                      : const Icon(Icons.store_mall_directory),
-                  label: Text(_isCreatingShop ? '作成中...' : '新しい店舗を作成する'),
-                ),
-              ),
-            ],
+  /// 新規店舗作成ダイアログ
+  Future<void> _showCreateShopDialog(BuildContext context) async {
+    final controller = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新しい店舗を作成'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: '店舗名',
+              hintText: '例）〇〇駄菓子店',
+            ),
+            validator: (v) => (v == null || v.trim().isEmpty) ? '入力してください' : null,
           ),
         ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (formKey.currentState!.validate()) {
+                Navigator.of(ctx).pop(); // ダイアログを閉じる
+                await _onCreateNewShop(context, controller.text.trim()); // 作成処理へ
+              }
+            },
+            child: const Text('作成'),
+          ),
+        ],
       ),
     );
   }
 
-  /// 新しいショップを作成し、
-  /// - shops/{shopId} を作る
-  /// - shops/{shopId}/members/{uid} を role=owner で作る（正本）
-  /// - users/{uid}/memberships/{shopId} を role=owner で作る（参照）
-  /// - users/{uid}.currentShopId を更新する
-  Future<void> _onCreateNewShop(BuildContext context) async {
-    if (_isCreatingShop) return;
-
-    if (!_newShopFormKey.currentState!.validate()) {
-      return;
-    }
-
+  Future<void> _onCreateNewShop(BuildContext context, String shopName) async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('ログイン情報が見つかりません。再ログインしてください。'),
-        ),
-      );
-      return;
-    }
+    if (user == null) return;
 
-    final String shopName = _newShopNameController.text.trim();
-
-    setState(() {
-      _isCreatingShop = true;
-    });
+    setState(() => _isCreatingShop = true);
 
     try {
       final firestore = FirebaseFirestore.instance;
       final shopsRef = firestore.collection('shops');
       final usersRef = firestore.collection('users');
 
-      // shops コレクションに新しいショップを作成
-      final shopDocRef = await shopsRef.add(<String, Object?>{
+      // 1. 店舗作成
+      final shopDocRef = await shopsRef.add({
         'name': shopName,
         'ownerUserId': user.uid,
         'createdByUserId': user.uid,
@@ -393,31 +259,33 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
         'updatedByUserId': user.uid,
       });
 
-      final String newShopId = shopDocRef.id;
-
-      // members（正本）と memberships（参照）と currentShopId をまとめて作成
+      final newShopId = shopDocRef.id;
       final batch = firestore.batch();
 
-      final memberRef =
-      shopsRef.doc(newShopId).collection('members').doc(user.uid);
-      batch.set(memberRef, <String, Object?>{
-        'role': 'owner',
-        'joinedAt': FieldValue.serverTimestamp(),
-        'addedByUserId': user.uid,
-      });
+      // 2. メンバー追加（正本）
+      batch.set(
+        shopsRef.doc(newShopId).collection('members').doc(user.uid),
+        {
+          'role': 'owner',
+          'joinedAt': FieldValue.serverTimestamp(),
+          'addedByUserId': user.uid,
+        },
+      );
 
-      final membershipRef =
-      usersRef.doc(user.uid).collection('memberships').doc(newShopId);
-      batch.set(membershipRef, <String, Object?>{
-        'role': 'owner',
-        'joinedAt': FieldValue.serverTimestamp(),
-        'shopNameCache': shopName,
-      });
+      // 3. メンバーシップ追加（参照）
+      batch.set(
+        usersRef.doc(user.uid).collection('memberships').doc(newShopId),
+        {
+          'role': 'owner',
+          'joinedAt': FieldValue.serverTimestamp(),
+          'shopNameCache': shopName,
+        },
+      );
 
-      // users/{uid}.currentShopId を新しいショップIDに更新（merge）
+      // 4. 現在の店舗を更新
       batch.set(
         usersRef.doc(user.uid),
-        <String, Object?>{
+        {
           'currentShopId': newShopId,
           'updatedAt': FieldValue.serverTimestamp(),
         },
@@ -426,249 +294,174 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
 
       await batch.commit();
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('新しい店舗「$shopName」を作成しました'),
-        ),
-      );
-
-      // メニューから開いている場合は戻す（戻った先でAuthGateが切り替える）
-      if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('店舗「$shopName」を作成しました')),
+        );
       }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('店舗の作成に失敗しました: $e')),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('作成に失敗しました: $e')),
+        );
+      }
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _isCreatingShop = false;
-      });
+      if (mounted) setState(() => _isCreatingShop = false);
     }
   }
 
   Future<void> _onGenerateInviteQr(BuildContext context, String shopId) async {
-    if (_isGeneratingInvite) return;
-
-    setState(() {
-      _isGeneratingInvite = true;
-    });
+    setState(() => _isGeneratinInvite = true);
 
     try {
       final shopRepo = ref.read(shopRepositoryProvider);
       final invite = await shopRepo.createOneTimeInvite(shopId);
-
       final payloadJson = jsonEncode(invite.toPayload());
 
-      if (!mounted) return;
-      await showDialog<void>(
+      if (!context.mounted) return;
+      await showDialog(
         context: context,
-        builder: (dialogContext) {
-          return _InviteQrDialog(
-            payloadJson: payloadJson,
-            invite: invite,
-            onCopy: () async {
-              await Clipboard.setData(ClipboardData(text: payloadJson));
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('招待データ（JSON）をコピーしました')),
-              );
-            },
-            onRevoke: () async {
-              try {
-                await shopRepo.revokeInvite(
-                  shopId: invite.shopId,
-                  inviteId: invite.inviteId,
-                );
-                if (!mounted) return;
-                Navigator.of(dialogContext).pop();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('招待を失効しました')),
-                );
-              } catch (e) {
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('招待の失効に失敗しました: $e')),
-                );
-              }
-            },
-          );
-        },
+        builder: (_) => _InviteQrDialog(
+          payloadJson: payloadJson,
+          invite: invite,
+          onRevoke: () async {
+            await shopRepo.revokeInvite(shopId: invite.shopId, inviteId: invite.inviteId);
+            if (context.mounted) Navigator.of(context).pop();
+          },
+        ),
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('招待QRの作成に失敗しました: $e')),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('エラー: $e')));
+      }
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _isGeneratingInvite = false;
-      });
+      if (mounted) setState(() => _isGeneratinInvite = false);
     }
   }
 
   Future<void> _onScanInviteQr(BuildContext context) async {
-    if (_isAcceptingInvite) return;
-
     final scanned = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (_) => const _InviteQrScanScreen(),
-      ),
+      MaterialPageRoute(builder: (_) => const _InviteQrScanScreen()),
     );
 
     if (scanned == null || scanned.trim().isEmpty) return;
 
-    setState(() {
-      _isAcceptingInvite = true;
-    });
+    setState(() => _isAcceptingInvite = true);
 
     try {
-      // QR は JSON 文字列（ShopInvite.toPayload を jsonEncode したもの）を想定
       final dynamic decoded = jsonDecode(scanned);
-      if (decoded is! Map) {
-        throw const FormatException('QRの形式が不正です（JSONオブジェクトではありません）');
-      }
+      if (decoded is! Map) throw const FormatException('QR形式エラー');
 
       final payload = decoded.cast<String, dynamic>();
       final invite = ShopInvite.fromPayload(payload);
 
-      // 期限切れはクライアント側でも弾く（サーバー側でも弾く）
       if (invite.expiresAt.isBefore(DateTime.now())) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('この招待QRは期限切れです（24時間）')),
-        );
-        return;
+        throw const FormatException('期限切れの招待QRです');
       }
 
-      // Firestoreで受諾（招待を使用済みにし、members/memberships/currentShopId を更新する）
-      final shopRepo = ref.read(shopRepositoryProvider);
-      await shopRepo.acceptInvite(
+      await ref.read(shopRepositoryProvider).acceptInvite(
         shopId: invite.shopId,
         inviteId: invite.inviteId,
         token: invite.token,
       );
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('店舗に参加しました')),
-      );
-
-      // メニューから開いている場合は戻す（戻った先で切り替えが起きる）
-      if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('店舗に参加しました')),
+        );
       }
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('店舗への参加に失敗しました: $e')),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('参加に失敗しました: $e')),
+        );
+      }
     } finally {
-      if (!mounted) return;
-      setState(() {
-        _isAcceptingInvite = false;
-      });
+      if (mounted) setState(() => _isAcceptingInvite = false);
     }
   }
 }
 
-class _InviteQrDialog extends StatelessWidget {
-  const _InviteQrDialog({
-    required this.payloadJson,
-    required this.invite,
-    required this.onCopy,
-    required this.onRevoke,
-  });
+// ==========================================
+// ヘルパーウィジェット
+// ==========================================
 
-  final String payloadJson;
-  final ShopInvite invite;
-  final VoidCallback onCopy;
-  final VoidCallback onRevoke;
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.title});
+  final String title;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final expiresText = invite.expiresAt.toLocal().toString().split('.').first;
-
-    // AlertDialog は内部で intrinsic 計測を行うことがあり、
-    // qr_flutter の QrImageView（内部で LayoutBuilder を利用）と相性が悪く
-    // 「LayoutBuilder does not support returning intrinsic dimensions」が発生する。
-    // そのため、Dialog + 固定サイズの SizedBox で安全に表示する。
-    return Dialog(
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(
-          maxWidth: 420,
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  '招待QR（1回限り・24時間）',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  width: 240,
-                  height: 240,
-                  child: QrImageView(
-                    data: payloadJson,
-                    version: QrVersions.auto,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  '有効期限: $expiresText',
-                  style: theme.textTheme.bodySmall,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  '※ このQRは1回使われると無効になります。',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: onCopy,
-                      child: const Text('コピー'),
-                    ),
-                    TextButton(
-                      onPressed: onRevoke,
-                      child: const Text('失効'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('閉じる'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+      child: Text(
+        title,
+        style: TextStyle(
+          color: Theme.of(context).colorScheme.primary,
+          fontSize: 13,
+          fontWeight: FontWeight.bold,
         ),
       ),
     );
   }
 }
 
+/// 招待QR表示ダイアログ
+class _InviteQrDialog extends StatelessWidget {
+  const _InviteQrDialog({
+    required this.payloadJson,
+    required this.invite,
+    required this.onRevoke,
+  });
+
+  final String payloadJson;
+  final ShopInvite invite;
+  final VoidCallback onRevoke;
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              '招待QR',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            const Text('スキャンして参加（24時間有効）', style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: 200,
+              height: 200,
+              child: QrImageView(data: payloadJson, version: QrVersions.auto),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: onRevoke,
+                  style: TextButton.styleFrom(foregroundColor: Colors.red),
+                  child: const Text('無効化する'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('閉じる'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// QRスキャン画面
 class _InviteQrScanScreen extends StatefulWidget {
   const _InviteQrScanScreen();
 
@@ -682,9 +475,7 @@ class _InviteQrScanScreenState extends State<_InviteQrScanScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('招待QRを読み取る'),
-      ),
+      appBar: AppBar(title: const Text('QRをスキャン')),
       body: MobileScanner(
         controller: MobileScannerController(
           detectionSpeed: DetectionSpeed.noDuplicates,
@@ -692,14 +483,11 @@ class _InviteQrScanScreenState extends State<_InviteQrScanScreen> {
         ),
         onDetect: (capture) {
           if (_detected) return;
-          final barcodes = capture.barcodes;
-          if (barcodes.isEmpty) return;
-
-          final raw = barcodes.first.rawValue;
-          if (raw == null || raw.trim().isEmpty) return;
-
-          _detected = true;
-          Navigator.of(context).pop(raw);
+          final val = capture.barcodes.first.rawValue;
+          if (val != null) {
+            _detected = true;
+            Navigator.of(context).pop(val);
+          }
         },
       ),
     );

@@ -1,28 +1,24 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'package:expiry_date/core/user/user_providers.dart';
+import 'package:expiry_date/core/snacks/snack_repository.dart';
 import 'package:expiry_date/models/snack_item.dart';
 
 /// ゴミ箱画面
-///
-/// - 一覧は isArchived == true のみ表示
-/// - 左スワイプ（endToStart）：完全削除（Firestoreから削除）
-/// - 右スワイプ（startToEnd）：元に戻す（isArchived=false）
 class TrashScreen extends ConsumerWidget {
   const TrashScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final shopId = ref.watch(currentShopIdProvider);
+    final archivedSnacksAsync = ref.watch(archivedSnackListStreamProvider);
     final scaffoldMessenger = ScaffoldMessenger.of(context);
-    final db = FirebaseFirestore.instance;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('ゴミ箱'),
+        // ★修正点: スクロール時に色がつくのを防ぐ設定
+        scrolledUnderElevation: 0,
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
         actions: [
           IconButton(
             tooltip: 'ゴミ箱を空にする',
@@ -32,7 +28,7 @@ class TrashScreen extends ConsumerWidget {
                 context: context,
                 builder: (context) => AlertDialog(
                   title: const Text('ゴミ箱を空にする'),
-                  content: const Text('ゴミ箱の中身をすべて完全削除します。よろしいですか？'),
+                  content: const Text('ゴミ箱の中身をすべて完全削除します。\nこの操作は取り消せません。\nよろしいですか？'),
                   actions: [
                     TextButton(
                       onPressed: () => Navigator.of(context).pop(false),
@@ -40,103 +36,57 @@ class TrashScreen extends ConsumerWidget {
                     ),
                     TextButton(
                       onPressed: () => Navigator.of(context).pop(true),
-                      child: const Text(
-                        '削除',
-                        style: TextStyle(color: Colors.red),
-                      ),
+                      child: const Text('削除', style: TextStyle(color: Colors.red)),
                     ),
                   ],
                 ),
-              ) ??
-                  false;
+              ) ?? false;
 
               if (!ok) return;
 
               try {
-                final snapshot = await db
-                    .collection('shops')
-                    .doc(shopId)
-                    .collection('snacks')
-                    .where('isArchived', isEqualTo: true)
-                    .get();
-
-                final batch = db.batch();
-                for (final doc in snapshot.docs) {
-                  batch.delete(doc.reference);
+                final currentList = archivedSnacksAsync.value ?? [];
+                if (currentList.isEmpty) {
+                  scaffoldMessenger.showSnackBar(const SnackBar(content: Text('ゴミ箱はすでに空です')));
+                  return;
                 }
-                await batch.commit();
 
-                scaffoldMessenger.clearSnackBars();
-                scaffoldMessenger.showSnackBar(
-                  const SnackBar(content: Text('ゴミ箱を空にしました')),
-                );
+                final repo = ref.read(snackRepositoryProvider);
+                int count = 0;
+                for (final item in currentList) {
+                  if (item.id != null) {
+                    await repo.deleteSnackPermanently(item.id!);
+                    count++;
+                  }
+                }
+
+                scaffoldMessenger.showSnackBar(SnackBar(content: Text('$count 件を完全に削除しました')));
               } catch (e) {
-                scaffoldMessenger.clearSnackBars();
-                scaffoldMessenger.showSnackBar(
-                  SnackBar(content: Text('ゴミ箱を空にできませんでした: $e')),
-                );
+                scaffoldMessenger.showSnackBar(SnackBar(content: Text('エラーが発生しました: $e')));
               }
             },
           ),
         ],
       ),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: db
-            .collection('shops')
-            .doc(shopId)
-            .collection('snacks')
-            .where('isArchived', isEqualTo: true)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(
-              child: Text('ゴミ箱の取得中にエラーが発生しました: ${snapshot.error}'),
-            );
-          }
-
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
-          final docs = snapshot.data!.docs;
-
-          final entries = docs.map((doc) {
-            final data = doc.data();
-            final expiryTs = data['expiry'] as Timestamp?;
-            final expiry = expiryTs?.toDate() ?? DateTime.now();
-
-            final snack = SnackItem(
-              name: data['name'] as String? ?? '',
-              expiry: expiry,
-              janCode: data['janCode'] as String?,
-              price: (data['price'] as num?)?.toInt(),
-            );
-
-            return _TrashDocEntry(
-              docId: doc.id,
-              snack: snack,
-            );
-          }).toList();
-
-          entries.sort((a, b) => a.snack.expiry.compareTo(b.snack.expiry));
-
-          if (entries.isEmpty) {
-            return const Center(
-              child: Text('ゴミ箱は空です。'),
-            );
+      body: archivedSnacksAsync.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (err, stack) => Center(child: Text('エラーが発生しました: $err')),
+        data: (snacks) {
+          if (snacks.isEmpty) {
+            return const Center(child: Text('ゴミ箱は空です。'));
           }
 
           return ListView.builder(
-            itemCount: entries.length,
+            itemCount: snacks.length,
             itemBuilder: (context, index) {
-              final entry = entries[index];
-              final snack = entry.snack;
+              final snack = snacks[index];
+              final docId = snack.id!;
 
               return Dismissible(
-                key: ValueKey('trash_${entry.docId}'),
+                key: ValueKey('trash_$docId'),
                 direction: DismissDirection.horizontal,
 
-                // 右へスワイプ → 復元（startToEnd）
+                // 右へスワイプ → 復元
                 background: Container(
                   alignment: Alignment.centerLeft,
                   color: Colors.green.shade400,
@@ -145,18 +95,12 @@ class TrashScreen extends ConsumerWidget {
                     children: [
                       Icon(Icons.undo, color: Colors.white, size: 28),
                       SizedBox(width: 8),
-                      Text(
-                        '元に戻す',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
+                      Text('元に戻す', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),
 
-                // 左へスワイプ → 完全削除（endToStart）
+                // 左へスワイプ → 完全削除
                 secondaryBackground: Container(
                   alignment: Alignment.centerRight,
                   color: Colors.red.shade400,
@@ -164,13 +108,7 @@ class TrashScreen extends ConsumerWidget {
                   child: const Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      Text(
-                        '完全削除',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
+                      Text('完全削除', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                       SizedBox(width: 8),
                       Icon(Icons.delete_forever, color: Colors.white, size: 28),
                     ],
@@ -179,12 +117,11 @@ class TrashScreen extends ConsumerWidget {
 
                 confirmDismiss: (direction) async {
                   if (direction == DismissDirection.endToStart) {
-                    // 完全削除は確認
                     return await showDialog<bool>(
                       context: context,
                       builder: (context) => AlertDialog(
                         title: const Text('完全削除の確認'),
-                        content: Text('「${snack.name}」を完全に削除しますか？'),
+                        content: Text('「${snack.name}」を完全に削除しますか？\n元に戻すことはできません。'),
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.of(context).pop(false),
@@ -192,81 +129,41 @@ class TrashScreen extends ConsumerWidget {
                           ),
                           TextButton(
                             onPressed: () => Navigator.of(context).pop(true),
-                            child: const Text(
-                              '削除',
-                              style: TextStyle(color: Colors.red),
-                            ),
+                            child: const Text('削除', style: TextStyle(color: Colors.red)),
                           ),
                         ],
                       ),
-                    ) ??
-                        false;
+                    ) ?? false;
                   }
-                  // 復元は確認なし
                   return true;
                 },
 
                 onDismissed: (direction) async {
+                  final repo = ref.read(snackRepositoryProvider);
                   try {
-                    final user = FirebaseAuth.instance.currentUser;
-
                     if (direction == DismissDirection.startToEnd) {
-                      // 復元
-                      await db
-                          .collection('shops')
-                          .doc(shopId)
-                          .collection('snacks')
-                          .doc(entry.docId)
-                          .update({
-                        'isArchived': false,
-                        'archivedAt': null,
-                        'archivedByUserId': null,
-                        'updatedAt': FieldValue.serverTimestamp(),
-                        'updatedByUserId': user?.uid,
-                      });
-
+                      await repo.restoreSnack(docId);
                       scaffoldMessenger.clearSnackBars();
                       scaffoldMessenger.showSnackBar(
                         SnackBar(
                           content: Text('「${snack.name}」を元に戻しました'),
                           action: SnackBarAction(
-                            label: '元に戻す',
+                            label: '取り消す',
                             onPressed: () async {
-                              await db
-                                  .collection('shops')
-                                  .doc(shopId)
-                                  .collection('snacks')
-                                  .doc(entry.docId)
-                                  .update({
-                                'isArchived': true,
-                                'archivedAt': FieldValue.serverTimestamp(),
-                                'archivedByUserId': user?.uid,
-                                'updatedAt': FieldValue.serverTimestamp(),
-                                'updatedByUserId': user?.uid,
-                              });
+                              await repo.archiveSnack(docId);
                             },
                           ),
                         ),
                       );
                     } else {
-                      // 完全削除
-                      await db
-                          .collection('shops')
-                          .doc(shopId)
-                          .collection('snacks')
-                          .doc(entry.docId)
-                          .delete();
-
+                      await repo.deleteSnackPermanently(docId);
                       scaffoldMessenger.clearSnackBars();
                       scaffoldMessenger.showSnackBar(
                         SnackBar(content: Text('「${snack.name}」を完全削除しました')),
                       );
                     }
                   } catch (e) {
-                    scaffoldMessenger.clearSnackBars();
-                    scaffoldMessenger.showSnackBar(
-                      SnackBar(content: Text('操作に失敗しました: $e')),
-                    );
+                    scaffoldMessenger.showSnackBar(SnackBar(content: Text('操作に失敗しました: $e')));
                   }
                 },
 
@@ -275,12 +172,16 @@ class TrashScreen extends ConsumerWidget {
                     snack.name,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+                    // ★修正: 打ち消し線を削除、色はグレーのまま
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   subtitle: Text(
                     '賞味期限: ${snack.expiry.toLocal().toString().split(' ')[0]}'
                         '${snack.price != null ? ' / ${snack.price}円' : ''}',
                   ),
+                  // ★修正: アイコンの色指定を削除してデフォルトに戻す
                   leading: const Icon(Icons.delete_outline),
                 ),
               );
@@ -290,15 +191,4 @@ class TrashScreen extends ConsumerWidget {
       ),
     );
   }
-}
-
-/// Firestore ドキュメントIDと SnackItem をまとめて扱うための小さなクラス（ゴミ箱用）
-class _TrashDocEntry {
-  const _TrashDocEntry({
-    required this.docId,
-    required this.snack,
-  });
-
-  final String docId;
-  final SnackItem snack;
 }

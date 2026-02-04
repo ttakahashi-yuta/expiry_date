@@ -13,24 +13,14 @@ class UserRepository {
   CollectionReference<Map<String, dynamic>> get _usersRef =>
       _firestore.collection('users');
 
-  /// FirebaseAuth の [firebaseUser] に対応するユーザードキュメントを
-  /// Firestore 上に必ず作成した上で、その内容を [AppUser] として返す。
-  ///
-  /// 既に存在する場合はそれを読み込んで返す。
-  /// 存在しない場合は新規に作成し、その後のドキュメント内容を返す。
-  ///
-  /// ※新規作成時には currentShopId は設定せず、
-  ///   「ショップ未選択」の状態を null で表現する。
-  ///
-  /// ※既存ドキュメントがある場合：
-  ///   Appleログイン等では displayName/email が null になることがあるため、
-  ///   null で上書きしないように注意する。
+  /// ユーザードキュメントを確実に作成・更新し、最新の状態を返す。
+  /// 書き込み後の再読み取りを省き、通信コストを最適化。
   Future<AppUser> ensureUserDocument(User firebaseUser) async {
     final docRef = _usersRef.doc(firebaseUser.uid);
     final snapshot = await docRef.get();
 
     if (snapshot.exists) {
-      // 既存ユーザー：nullで上書きしない範囲で、必要なら更新する
+      // 既存ユーザーの処理
       final existing = AppUser.fromFirestore(snapshot);
 
       final String? newDisplayName = firebaseUser.displayName;
@@ -38,72 +28,70 @@ class UserRepository {
 
       final Map<String, Object?> updates = <String, Object?>{};
 
-      // displayName: Auth側が null なら更新しない
       if (newDisplayName != null &&
           newDisplayName.trim().isNotEmpty &&
           newDisplayName != existing.displayName) {
         updates['displayName'] = newDisplayName;
       }
 
-      // email: Auth側が null なら更新しない
       if (newEmail != null &&
           newEmail.trim().isNotEmpty &&
           newEmail != existing.email) {
         updates['email'] = newEmail;
       }
 
-      // 何かしら更新があるときだけ updatedAt を更新する
       if (updates.isNotEmpty) {
         updates['updatedAt'] = FieldValue.serverTimestamp();
         await docRef.update(updates);
-        final updatedSnapshot = await docRef.get();
-        return AppUser.fromFirestore(updatedSnapshot);
+
+        // ★改善：再読み取り(get)をせず、手元のデータで更新後のオブジェクトを作る
+        return existing.copyWith(
+          displayName: newDisplayName ?? existing.displayName,
+          email: newEmail ?? existing.email,
+        );
       }
 
       return existing;
     }
 
-    // 新規ユーザー：displayName/email が null の可能性はあるが、そのまま保存でOK
-    await docRef.set(<String, Object?>{
-      // currentShopId はあえて書かない（null のまま＝ショップ未選択）
+    // 新規ユーザーの作成
+    final Map<String, dynamic> newData = {
       'displayName': firebaseUser.displayName,
       'email': firebaseUser.email,
       'createdAt': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
-    });
+      // currentShopId は初期状態では含めない（null扱い）
+    };
 
-    final createdSnapshot = await docRef.get();
-    return AppUser.fromFirestore(createdSnapshot);
+    await docRef.set(newData);
+
+    // ★改善：setした直後のデータをそのままAppUserにして返す（Readコストを削減）
+    return AppUser(
+      uid: firebaseUser.uid,
+      displayName: firebaseUser.displayName,
+      email: firebaseUser.email,
+      currentShopId: null,
+    );
   }
 
   /// 単発でユーザー情報を取得する。
-  ///
-  /// ドキュメントが存在しない場合は null を返す。
   Future<AppUser?> fetchUser(String uid) async {
     final docRef = _usersRef.doc(uid);
     final snapshot = await docRef.get();
-    if (!snapshot.exists) {
-      return null;
-    }
+    if (!snapshot.exists) return null;
     return AppUser.fromFirestore(snapshot);
   }
 
   /// Firestore 上のユーザードキュメントを監視するストリーム。
-  ///
-  /// ドキュメントが存在しない状態では null を返す。
   Stream<AppUser?> watchUser(String uid) {
     final docRef = _usersRef.doc(uid);
     return docRef.snapshots().map((snapshot) {
-      if (!snapshot.exists) {
-        return null;
-      }
+      if (!snapshot.exists) return null;
       return AppUser.fromFirestore(snapshot);
     });
   }
 }
 
-/// [UserRepository] 自体を提供する Provider。
 final userRepositoryProvider = Provider<UserRepository>((ref) {
-  final firestore = FirebaseFirestore.instance;
-  return UserRepository(firestore);
+  return UserRepository(FirebaseFirestore.instance);
 });

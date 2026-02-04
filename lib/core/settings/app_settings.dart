@@ -6,33 +6,42 @@ import 'package:shared_preferences/shared_preferences.dart';
 class AppSettings {
   const AppSettings({
     required this.soonThresholdDays,
+    required this.isKeepAddingEnabled, // ★追加
   });
 
   /// 「もうすぐ」判定（daysLeft <= soonThresholdDays で “もうすぐ”）
   final int soonThresholdDays;
+
+  /// 連続登録チェックボックスの状態
+  final bool isKeepAddingEnabled; // ★追加
 
   static const int defaultSoonThresholdDays = 30;
   static const int maxSoonThresholdDays = 3650; // 10年
 
   AppSettings copyWith({
     int? soonThresholdDays,
+    bool? isKeepAddingEnabled,
   }) {
     return AppSettings(
       soonThresholdDays: soonThresholdDays ?? this.soonThresholdDays,
+      isKeepAddingEnabled: isKeepAddingEnabled ?? this.isKeepAddingEnabled,
     );
   }
 
   @override
   bool operator ==(Object other) {
-    return other is AppSettings && other.soonThresholdDays == soonThresholdDays;
+    return other is AppSettings &&
+        other.soonThresholdDays == soonThresholdDays &&
+        other.isKeepAddingEnabled == isKeepAddingEnabled;
   }
 
   @override
-  int get hashCode => soonThresholdDays.hashCode;
+  int get hashCode => Object.hash(soonThresholdDays, isKeepAddingEnabled);
 }
 
 class AppSettingsNotifier extends Notifier<AppSettings> {
   static const String _keySoonThresholdDays = 'soonThresholdDays';
+  static const String _keyKeepAdding = 'keepAddingEnabled'; // ★キー追加
 
   @override
   AppSettings build() {
@@ -41,23 +50,27 @@ class AppSettingsNotifier extends Notifier<AppSettings> {
 
     return const AppSettings(
       soonThresholdDays: AppSettings.defaultSoonThresholdDays,
+      isKeepAddingEnabled: false, // デフォルト値
     );
   }
 
   Future<void> _loadFromPrefs() async {
-    // buildが返った後に呼ばれるので、ここで state を読むのはOK
     final before = state;
-
     final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getInt(_keySoonThresholdDays);
-    if (saved == null) return;
 
-    // ユーザー操作などで state が変わっていたら、読み込み結果で上書きしない
+    // 読み込み
+    final savedDays = prefs.getInt(_keySoonThresholdDays);
+    final savedKeepAdding = prefs.getBool(_keyKeepAdding);
+
     if (!ref.mounted) return;
+    // ユーザー操作などで state が変わっていたら、読み込み結果で上書きしない
     if (state != before) return;
 
-    final clamped = _clampSoonDays(saved);
-    state = state.copyWith(soonThresholdDays: clamped);
+    // 更新
+    state = state.copyWith(
+      soonThresholdDays: savedDays != null ? _clampSoonDays(savedDays) : null,
+      isKeepAddingEnabled: savedKeepAdding,
+    );
   }
 
   Future<void> setSoonThresholdDays(int days) async {
@@ -77,6 +90,15 @@ class AppSettingsNotifier extends Notifier<AppSettings> {
     state = state.copyWith(
       soonThresholdDays: AppSettings.defaultSoonThresholdDays,
     );
+  }
+
+  // ★追加: 連続登録の設定保存
+  Future<void> setKeepAddingEnabled(bool enabled) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyKeepAdding, enabled);
+
+    if (!ref.mounted) return;
+    state = state.copyWith(isKeepAddingEnabled: enabled);
   }
 
   int _clampSoonDays(int value) {

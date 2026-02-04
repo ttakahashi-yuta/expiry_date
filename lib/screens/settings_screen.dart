@@ -16,6 +16,8 @@ class SettingsScreen extends ConsumerWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('設定'),
+        // スクロール時の色付き防止（お好みで）
+        scrolledUnderElevation: 0,
       ),
       body: ListView(
         children: [
@@ -53,10 +55,13 @@ class SettingsScreen extends ConsumerWidget {
                 const Icon(Icons.chevron_right),
               ],
             ),
-            onTap: () => _showSoonThresholdDialog(
-              context: context,
-              currentDays: soonThresholdDays,
-            ),
+            onTap: () async {
+              // 関数に切り出さず、直接呼び出す形に整理
+              await showDialog<void>(
+                context: context,
+                builder: (_) => _SoonThresholdDialog(currentDays: soonThresholdDays),
+              );
+            },
           ),
           const Divider(height: 1),
 
@@ -70,6 +75,8 @@ class SettingsScreen extends ConsumerWidget {
               showLicensePage(
                 context: context,
                 applicationName: '賞味期限管理',
+                // アプリのアイコンがある場合、ここにIconウィジェットを渡せます
+                // applicationIcon: const Icon(Icons.inventory_2, size: 48),
               );
             },
           ),
@@ -77,17 +84,6 @@ class SettingsScreen extends ConsumerWidget {
       ),
     );
   }
-}
-
-Future<void> _showSoonThresholdDialog({
-  required BuildContext context,
-  required int currentDays,
-}) async {
-  await showDialog<void>(
-    context: context,
-    barrierDismissible: true,
-    builder: (_) => _SoonThresholdDialog(currentDays: currentDays),
-  );
 }
 
 class _SoonThresholdDialog extends ConsumerStatefulWidget {
@@ -108,7 +104,15 @@ class _SoonThresholdDialogState extends ConsumerState<_SoonThresholdDialog> {
   @override
   void initState() {
     super.initState();
-    _controller = TextEditingController(text: widget.currentDays.toString());
+    final text = widget.currentDays.toString();
+    _controller = TextEditingController(text: text);
+
+    // 【UX改善】開いた瞬間に数値を選択状態にする
+    // これにより、ユーザーはバックスペースを押さずにすぐ新しい数値を入力できます
+    _controller.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: text.length,
+    );
   }
 
   @override
@@ -118,41 +122,38 @@ class _SoonThresholdDialogState extends ConsumerState<_SoonThresholdDialog> {
   }
 
   Future<void> _resetToDefault(BuildContext context) async {
+    // ノティファイア側のメソッドを呼ぶ
     await ref.read(appSettingsProvider.notifier).resetSoonThresholdToDefault();
     if (!mounted) return;
-
-    FocusScope.of(context).unfocus();
     Navigator.of(context).pop();
   }
 
   Future<void> _save(BuildContext context) async {
-    final parsed = int.tryParse(_controller.text);
+    final text = _controller.text;
 
+    // 空文字チェック
+    if (text.isEmpty) {
+      setState(() => _errorText = '数字を入力してください');
+      return;
+    }
+
+    final parsed = int.tryParse(text);
+    // digitsOnlyを使っているため、パースエラーは実質起きないが念のため
     if (parsed == null) {
-      setState(() {
-        _errorText = '数字を入力してください';
-      });
+      setState(() => _errorText = '無効な数値です');
       return;
     }
 
+    // digitsOnlyなのでマイナス値チェックは不要
     if (parsed > 3650) {
-      setState(() {
-        _errorText = '大きすぎます（最大3650日）';
-      });
+      setState(() => _errorText = '大きすぎます（最大3650日）');
       return;
     }
 
-    if (parsed < 0) {
-      setState(() {
-        _errorText = '0以上を入力してください';
-      });
-      return;
-    }
-
+    // 保存処理
     await ref.read(appSettingsProvider.notifier).setSoonThresholdDays(parsed);
-    if (!mounted) return;
 
-    FocusScope.of(context).unfocus();
+    if (!mounted) return;
     Navigator.of(context).pop();
   }
 
@@ -165,28 +166,31 @@ class _SoonThresholdDialogState extends ConsumerState<_SoonThresholdDialog> {
         children: [
           TextField(
             controller: _controller,
+            autofocus: true, // 【UX改善】自動でキーボードを出す
             keyboardType: TextInputType.number,
             inputFormatters: [
-              FilteringTextInputFormatter.digitsOnly,
+              FilteringTextInputFormatter.digitsOnly, // 数字のみ許可
             ],
             decoration: InputDecoration(
               labelText: '日数',
-              helperText: '0以上の整数（デフォルト: 30）',
+              hintText: '例）30',
+              helperText: '0以上の整数',
               errorText: _errorText,
+              border: const OutlineInputBorder(), // 入力欄をわかりやすく
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             ),
+            onSubmitted: (_) => _save(context), // エンターキーで保存
           ),
         ],
       ),
       actions: [
         TextButton(
           onPressed: () => _resetToDefault(context),
+          style: TextButton.styleFrom(foregroundColor: Colors.grey),
           child: const Text('デフォルトに戻す'),
         ),
         TextButton(
-          onPressed: () {
-            FocusScope.of(context).unfocus();
-            Navigator.of(context).pop();
-          },
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('キャンセル'),
         ),
         FilledButton(
@@ -207,11 +211,11 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), // 上のマージンを少し広げました
       child: Text(
         title,
-        style: theme.textTheme.titleSmall?.copyWith(
-          color: theme.colorScheme.onSurfaceVariant,
+        style: theme.textTheme.labelLarge?.copyWith( // labelLargeの方がセクションヘッダらしい見た目になります
+          color: theme.colorScheme.primary, // アクセントカラーを使用
           fontWeight: FontWeight.bold,
         ),
       ),

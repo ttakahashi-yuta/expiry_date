@@ -1,14 +1,15 @@
-import 'package:flutter/foundation.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'package:expiry_date/core/jan_master/jan_master_repository.dart';
+import 'package:expiry_date/core/shop/shop_repository.dart';
+import 'package:expiry_date/core/settings/app_settings.dart';
 import 'package:expiry_date/core/user/user_providers.dart';
+import 'package:expiry_date/core/snacks/snack_repository.dart';
 import '../models/snack_item.dart';
 
 class AddSnackFlowScreen extends ConsumerStatefulWidget {
@@ -19,40 +20,28 @@ class AddSnackFlowScreen extends ConsumerStatefulWidget {
 }
 
 class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
-  // ======================
-  // 入力状態
-  // ======================
-  String? _janCode;
+  late MobileScannerController _scannerController;
 
+  // 入力状態
+  String? _janCode;
   final TextEditingController _nameController = TextEditingController();
   final TextEditingController _priceController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
 
-  // 連続登録
-  bool _keepAdding = false;
-
-  // Firestore保存中
   bool _isSaving = false;
 
-  // ======================
-  // OCR
-  // ======================
+  // OCR関連
   final ImagePicker _picker = ImagePicker();
   bool _isRunningOcr = false;
   String? _ocrErrorMessage;
 
-  // ======================
-  // JANマスタ取得（自動入力のみ）
-  // ======================
+  // JANマスタ
   bool _isLoadingJanMaster = false;
   String? _janMasterErrorMessage;
   String? _masterName;
   int? _masterPrice;
 
-  // ======================
-  // 賞味期限（プルダウン）
-  // day は -1 を「末日」として扱う
-  // ======================
+  // 賞味期限
   int? _selectedYear;
   int? _selectedMonth;
   int? _selectedDay;
@@ -61,18 +50,21 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   void initState() {
     super.initState();
     _setExpiryToDefaultValues();
+    _scannerController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.noDuplicates,
+      facing: CameraFacing.back,
+      torchEnabled: false,
+    );
   }
 
   @override
   void dispose() {
     _nameController.dispose();
     _priceController.dispose();
+    _scannerController.dispose();
     super.dispose();
   }
 
-  // ======================
-  // 期限：デフォルト（翌月末日）
-  // ======================
   void _setExpiryToDefaultValues() {
     final now = DateTime.now();
     final nextMonth = DateTime(now.year, now.month + 1, 1);
@@ -82,8 +74,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   int _lastDayOfMonth(int year, int month) {
-    final lastDate = DateTime(year, month + 1, 0);
-    return lastDate.day;
+    return DateTime(year, month + 1, 0).day;
   }
 
   int _daysInMonth(int year, int month) {
@@ -94,7 +85,6 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     if (_selectedYear == null || _selectedMonth == null || _selectedDay == null) {
       return null;
     }
-
     final year = _selectedYear!;
     final month = _selectedMonth!;
     final day = _selectedDay!;
@@ -111,57 +101,73 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 
   void _applyExpiryFromDate(DateTime date) {
-    _selectedYear = date.year;
-    _selectedMonth = date.month;
-    _selectedDay = date.day;
+    setState(() {
+      _selectedYear = date.year;
+      _selectedMonth = date.month;
+      _selectedDay = date.day;
+      _ocrErrorMessage = null;
+    });
   }
 
-  // ======================
-  // 連続登録時リセット
-  // ======================
   void _resetFormForNext() {
     setState(() {
       _janCode = null;
-
       _nameController.text = '';
       _priceController.text = '';
-
       _ocrErrorMessage = null;
-
       _isLoadingJanMaster = false;
       _janMasterErrorMessage = null;
       _masterName = null;
       _masterPrice = null;
-
       _setExpiryToDefaultValues();
     });
   }
 
-  // ======================
-  // UI
-  // ======================
+  /// 賞味期限切れ判定（今日より前なら期限切れ）
+  bool _isExpired(DateTime? date) {
+    if (date == null) return false;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return date.isBefore(today);
+  }
+
   @override
   Widget build(BuildContext context) {
-    // 画面全体のフォントを少し大きく
     final baseTheme = Theme.of(context);
     final bigTheme = baseTheme.copyWith(
       textTheme: baseTheme.textTheme.apply(fontSizeFactor: 1.12),
     );
+    final shopId = ref.watch(currentShopIdProvider);
+
+    final expiryDate = _buildSelectedExpiry();
+    final isExpired = _isExpired(expiryDate);
+    final backgroundColor = isExpired ? Colors.red.shade50 : baseTheme.colorScheme.surface;
 
     return Theme(
       data: bigTheme,
       child: Builder(
         builder: (context) {
-          final shopId = ref.watch(currentShopIdProvider);
-
           return Scaffold(
+            backgroundColor: backgroundColor,
             resizeToAvoidBottomInset: true,
             appBar: AppBar(
               title: const Text('商品を追加'),
+              backgroundColor: isExpired ? Colors.red.shade100 : null,
             ),
             body: SafeArea(
               child: Column(
                 children: [
+                  if (isExpired)
+                    Container(
+                      width: double.infinity,
+                      color: Colors.redAccent,
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: const Text(
+                        '⚠️ 賞味期限が切れています',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                      ),
+                    ),
                   Expanded(
                     child: GestureDetector(
                       behavior: HitTestBehavior.translucent,
@@ -177,63 +183,46 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                               _buildJanSection(context, shopId),
                               const SizedBox(height: 16),
 
-                              // 商品名（マスタで自動入力される想定：先に置く）
+                              // 1. 商品名
                               TextFormField(
                                 controller: _nameController,
-                                style: const TextStyle(
-                                  fontSize: 22, // ← さらに大きく
-                                  fontWeight: FontWeight.w600,
-                                ),
-                                decoration: const InputDecoration(
-                                  labelText: '商品名',
-                                  hintText: '例）うまい棒 めんたい味',
-                                ),
+                                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+                                decoration: const InputDecoration(labelText: '商品名', hintText: '例）うまい棒'),
                                 textInputAction: TextInputAction.next,
-                                validator: (value) {
-                                  if (value == null || value.trim().isEmpty) {
-                                    return '商品名を入力してください';
-                                  }
-                                  return null;
-                                },
+                                validator: (v) => (v == null || v.trim().isEmpty) ? '商品名を入力してください' : null,
                               ),
-
                               const SizedBox(height: 16),
 
-                              // 売価（右に「よく使う売価」プルダウン。中身はまだ空）
-                              _buildPriceRow(context),
-
-                              const SizedBox(height: 20),
-
-                              // 賞味期限（最後に置く）
+                              // 2. 賞味期限 (売価より先に移動)
                               Row(
                                 children: [
                                   Expanded(
                                     child: Text(
                                       '賞味期限',
-                                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                        fontWeight: FontWeight.w700,
-                                      ),
+                                      style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
                                     ),
                                   ),
-                                  IconButton(
-                                    tooltip: 'カメラで読み取る（OCR）',
-                                    onPressed: (_isRunningOcr || _isSaving) ? null : _onTapCaptureExpiry,
-                                    icon: const Icon(Icons.camera_alt_outlined),
-                                  ),
+                                  if (_isRunningOcr)
+                                    const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
+                                  else
+                                    IconButton(
+                                      tooltip: 'カメラで読み取る（OCR）',
+                                      onPressed: _isSaving ? null : _onTapCaptureExpiry,
+                                      icon: const Icon(Icons.camera_alt_outlined),
+                                    ),
                                 ],
                               ),
                               if (_ocrErrorMessage != null) ...[
                                 const SizedBox(height: 6),
-                                Text(
-                                  _ocrErrorMessage!,
-                                  style: TextStyle(
-                                    color: Theme.of(context).colorScheme.error,
-                                    fontSize: 13,
-                                  ),
-                                ),
+                                Text(_ocrErrorMessage!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 13)),
                               ],
-                              const SizedBox(height: 8),
+                              const SizedBox(height: 4),
                               _buildExpiryDropdowns(context),
+
+                              const SizedBox(height: 24),
+
+                              // 3. 売価 (最後に配置)
+                              _buildPriceSection(context, shopId),
 
                               const SizedBox(height: 24),
                             ],
@@ -242,39 +231,18 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                       ),
                     ),
                   ),
-
-                  // フッター（連続登録 + ボタン）
                   SafeArea(
                     top: false,
                     child: Container(
                       decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.surface,
-                        border: Border(
-                          top: BorderSide(
-                            color: Theme.of(context).colorScheme.outlineVariant,
-                            width: 0.8,
-                          ),
-                        ),
+                        color: backgroundColor,
+                        border: Border(top: BorderSide(color: Theme.of(context).colorScheme.outlineVariant, width: 0.8)),
                       ),
                       padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Row(
-                            children: [
-                              const Expanded(
-                                child: SizedBox.shrink(),
-                              ),
-                              const Text('連続登録'),
-                              const SizedBox(width: 8),
-                              Checkbox(
-                                value: _keepAdding,
-                                onChanged: _isSaving
-                                    ? null
-                                    : (v) => setState(() => _keepAdding = (v ?? false)),
-                              ),
-                            ],
-                          ),
+                          _buildKeepAddingCheckbox(context),
                           const SizedBox(height: 10),
                           Row(
                             children: [
@@ -282,11 +250,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                                 child: OutlinedButton(
                                   style: OutlinedButton.styleFrom(
                                     minimumSize: const Size.fromHeight(54),
-                                    padding: const EdgeInsets.symmetric(vertical: 14),
-                                    textStyle: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                    foregroundColor: Colors.grey, // ← 文字色をグレーに
+                                    foregroundColor: Colors.grey,
                                   ),
                                   onPressed: _isSaving ? null : () => Navigator.of(context).pop(),
                                   child: const Text('キャンセル'),
@@ -296,20 +260,12 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                               Expanded(
                                 child: FilledButton(
                                   style: FilledButton.styleFrom(
-                                    backgroundColor: Colors.redAccent, // ← 登録ボタン赤
+                                    backgroundColor: isExpired ? Colors.red : Colors.redAccent,
                                     minimumSize: const Size.fromHeight(54),
-                                    padding: const EdgeInsets.symmetric(vertical: 14),
-                                    textStyle: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                    ),
                                   ),
                                   onPressed: _isSaving ? null : () => _onSubmit(),
                                   child: _isSaving
-                                      ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
-                                  )
+                                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                                       : const Text('登録'),
                                 ),
                               ),
@@ -328,39 +284,50 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     );
   }
 
+  Widget _buildKeepAddingCheckbox(BuildContext context) {
+    final settings = ref.watch(appSettingsProvider);
+    final isKeepAdding = settings.isKeepAddingEnabled;
+
+    return Row(
+      children: [
+        const Expanded(child: SizedBox.shrink()),
+        const Text('連続登録'),
+        const SizedBox(width: 8),
+        Checkbox(
+          value: isKeepAdding,
+          onChanged: _isSaving
+              ? null
+              : (v) {
+            ref.read(appSettingsProvider.notifier).setKeepAddingEnabled(v ?? false);
+          },
+        ),
+      ],
+    );
+  }
+
   Widget _buildJanSection(BuildContext context, String shopId) {
     final hasJan = _janCode != null && _janCode!.trim().isNotEmpty;
-
-    final bool canScan = !_isSaving && !_isRunningOcr && shopId.isNotEmpty;
+    final canScan = !_isSaving && !_isRunningOcr && shopId.isNotEmpty;
 
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(12),
-        color: Theme.of(context).colorScheme.surfaceVariant,
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
         border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'JANコード',
-                      style: Theme.of(context).textTheme.labelLarge,
-                    ),
+                    Text('JANコード', style: Theme.of(context).textTheme.labelLarge),
                     const SizedBox(height: 6),
-                    SelectableText(
-                      hasJan ? _janCode! : '未入力',
-                      style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
+                    SelectableText(hasJan ? _janCode! : '未入力', style: Theme.of(context).textTheme.bodyLarge?.copyWith(fontWeight: FontWeight.w700)),
                   ],
                 ),
               ),
@@ -368,15 +335,9 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
               SizedBox(
                 height: 54,
                 child: FilledButton.icon(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: Colors.redAccent, // ← スキャンボタン赤
-                    padding: const EdgeInsets.symmetric(horizontal: 14),
-                    textStyle: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  onPressed: (canScan) ? () => _openBarcodeScannerModal(context) : null,
-                  icon: const Icon(Icons.qr_code_scanner, size: 24),
+                  style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+                  onPressed: canScan ? () => _openBarcodeScannerModal(context) : null,
+                  icon: const Icon(Icons.qr_code_scanner),
                   label: Text(_isLoadingJanMaster ? '取得中…' : 'スキャン'),
                 ),
               ),
@@ -384,98 +345,86 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
           ),
           if (shopId.isEmpty) ...[
             const SizedBox(height: 10),
-            Text(
-              '店舗が未選択のためスキャン/登録できません。',
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.error,
-                fontSize: 13,
-              ),
-            ),
+            Text('店舗が未選択のためスキャンできません。', style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 13)),
           ],
           if (_janMasterErrorMessage != null) ...[
             const SizedBox(height: 10),
-            Text(
-              _janMasterErrorMessage!,
-              style: TextStyle(
-                color: Theme.of(context).colorScheme.error,
-                fontSize: 13,
-              ),
-            ),
+            Text(_janMasterErrorMessage!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 13)),
           ],
         ],
       ),
     );
   }
 
-  Widget _buildPriceRow(BuildContext context) {
-    // 今はまだ空（設定＋SharedPreferences実装は後続）
-    final frequentPrices = <int>[];
-
-    return Row(
+  // 売価入力セクション（チップをWrapで折り返し表示）
+  Widget _buildPriceSection(BuildContext context, String shopId) {
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Expanded(
-          child: TextFormField(
-            controller: _priceController,
-            style: const TextStyle(
-              fontSize: 22, // ← さらに大きく
-              fontWeight: FontWeight.w600,
-            ),
-            decoration: const InputDecoration(
-              labelText: '売価（円）',
-              hintText: '例）30',
-            ),
-            keyboardType: TextInputType.number,
-            textInputAction: TextInputAction.done,
-            validator: (value) {
-              if (value == null || value.trim().isEmpty) {
-                return null;
-              }
-              final normalized = value.replaceAll(',', '').trim();
-              final parsed = int.tryParse(normalized);
-              if (parsed == null || parsed < 0) {
-                return '0以上の数値を入力してください';
-              }
-              return null;
-            },
-            onFieldSubmitted: (_) => _onSubmit(),
-          ),
+        TextFormField(
+          controller: _priceController,
+          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+          decoration: const InputDecoration(labelText: '売価（円）', hintText: '例）30'),
+          keyboardType: TextInputType.number,
+          textInputAction: TextInputAction.done,
+          validator: (v) {
+            if (v == null || v.trim().isEmpty) return null;
+            final p = int.tryParse(v.replaceAll(',', '').trim());
+            if (p == null || p < 0) return '0以上の数値';
+            return null;
+          },
+          onFieldSubmitted: (_) => _onSubmit(),
         ),
-        const SizedBox(width: 12),
-        SizedBox(
-          width: 150,
-          child: DropdownButtonFormField<int>(
-            decoration: const InputDecoration(
-              labelText: 'よく使う',
-            ),
-            items: frequentPrices
-                .map(
-                  (p) => DropdownMenuItem<int>(
-                value: p,
-                child: Text('$p円'),
-              ),
-            )
-                .toList(),
-            value: null,
-            hint: const Text('未設定'),
-            onChanged: (frequentPrices.isEmpty || _isSaving)
-                ? null
-                : (value) {
-              if (value == null) return;
-              setState(() {
-                _priceController.text = value.toString();
-              });
+        const SizedBox(height: 8),
+
+        // よく使う売価チップ群
+        if (shopId.isNotEmpty)
+          StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+            stream: FirebaseFirestore.instance.collection('shops').doc(shopId).snapshots(),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData) return const SizedBox.shrink();
+              final data = snapshot.data!.data();
+              if (data == null) return const SizedBox.shrink();
+
+              final List<dynamic> rawList = data['frequentPrices'] ?? [];
+              final prices = rawList.cast<int>()..sort();
+
+              return SizedBox(
+                width: double.infinity,
+                child: Wrap(
+                  spacing: 8.0,
+                  runSpacing: 8.0,
+                  alignment: WrapAlignment.start,
+                  children: [
+                    // 価格チップ
+                    ...prices.map((price) {
+                      return ActionChip(
+                        label: Text('$price円'),
+                        onPressed: () {
+                          _priceController.text = price.toString();
+                          FocusScope.of(context).unfocus();
+                        },
+                      );
+                    }),
+
+                    // 「＋」追加ボタン
+                    ActionChip(
+                      avatar: const Icon(Icons.add, size: 16),
+                      label: const Text('追加'),
+                      backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+                      onPressed: () => _showFrequentPricesManageDialog(context, shopId),
+                    ),
+                  ],
+                ),
+              );
             },
           ),
-        ),
       ],
     );
   }
 
   Widget _buildExpiryDropdowns(BuildContext context) {
     final now = DateTime.now();
-
-    // 要件通り：現在年〜5年先まで（計6個）
     final years = <int>[for (int y = now.year; y <= now.year + 5; y++) y];
     final months = List<int>.generate(12, (i) => i + 1);
 
@@ -484,422 +433,108 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     final maxDay = _daysInMonth(baseYear, baseMonth);
 
     final dayItems = <DropdownMenuItem<int>>[
-      const DropdownMenuItem<int>(
-        value: -1,
-        child: Text('末日'),
-      ),
-      ...List<int>.generate(maxDay, (i) => i + 1).map(
-            (d) => DropdownMenuItem<int>(
-          value: d,
-          child: Text('$d日'),
-        ),
-      ),
+      const DropdownMenuItem(value: -1, child: Text('末日')),
+      ...List.generate(maxDay, (i) => i + 1).map((d) => DropdownMenuItem(value: d, child: Text('$d日'))),
     ];
 
-    final yearValue = (_selectedYear != null && years.contains(_selectedYear)) ? _selectedYear : years.first;
-    final monthValue = (_selectedMonth != null && months.contains(_selectedMonth)) ? _selectedMonth : 1;
-    final dayValue = _selectedDay ?? -1;
+    int? validYear = years.contains(_selectedYear) ? _selectedYear : years.first;
+    int? validMonth = months.contains(_selectedMonth) ? _selectedMonth : 1;
+    int? validDay = _selectedDay ?? -1;
+    if (validDay != -1 && validDay! > maxDay) validDay = maxDay;
+
+    Widget buildDropdown<T>({
+      required String label,
+      required T value,
+      required List<DropdownMenuItem<T>> items,
+      required ValueChanged<T?>? onChanged,
+    }) {
+      return Expanded(
+        child: InputDecorator(
+          decoration: InputDecoration(labelText: label, contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<T>(
+              value: value,
+              isDense: true,
+              items: items,
+              onChanged: onChanged,
+            ),
+          ),
+        ),
+      );
+    }
 
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.end,
       children: [
-        Expanded(
-          child: DropdownButtonFormField<int>(
-            decoration: const InputDecoration(labelText: '年'),
-            items: years
-                .map(
-                  (y) => DropdownMenuItem<int>(
-                value: y,
-                child: Text('$y年'),
-              ),
-            )
-                .toList(),
-            value: yearValue,
-            onChanged: (_isSaving || _isRunningOcr)
-                ? null
-                : (value) {
-              setState(() {
-                _selectedYear = value;
-                _ocrErrorMessage = null;
-
-                if (_selectedYear != null && _selectedMonth != null && _selectedDay != null && _selectedDay != -1) {
-                  final newMax = _daysInMonth(_selectedYear!, _selectedMonth!);
-                  if (_selectedDay! > newMax) {
-                    _selectedDay = newMax;
-                  }
-                }
-              });
-            },
-            validator: (value) => (value == null) ? '年を選択してください' : null,
-          ),
+        buildDropdown<int>(
+          label: '年',
+          value: validYear!,
+          items: years.map((y) => DropdownMenuItem(value: y, child: Text('$y年'))).toList(),
+          onChanged: _isSaving ? null : (v) => setState(() { _selectedYear = v; _ocrErrorMessage = null; }),
         ),
         const SizedBox(width: 8),
-        Expanded(
-          child: DropdownButtonFormField<int>(
-            decoration: const InputDecoration(labelText: '月'),
-            items: months
-                .map(
-                  (m) => DropdownMenuItem<int>(
-                value: m,
-                child: Text('$m月'),
-              ),
-            )
-                .toList(),
-            value: monthValue,
-            onChanged: (_isSaving || _isRunningOcr)
-                ? null
-                : (value) {
-              setState(() {
-                _selectedMonth = value;
-                _ocrErrorMessage = null;
-
-                if (_selectedYear != null && _selectedMonth != null && _selectedDay != null && _selectedDay != -1) {
-                  final newMax = _daysInMonth(_selectedYear!, _selectedMonth!);
-                  if (_selectedDay! > newMax) {
-                    _selectedDay = newMax;
-                  }
-                }
-              });
-            },
-            validator: (value) => (value == null) ? '月を選択してください' : null,
-          ),
+        buildDropdown<int>(
+          label: '月',
+          value: validMonth!,
+          items: months.map((m) => DropdownMenuItem(value: m, child: Text('$m月'))).toList(),
+          onChanged: _isSaving ? null : (v) => setState(() { _selectedMonth = v; _ocrErrorMessage = null; }),
         ),
         const SizedBox(width: 8),
-        Expanded(
-          child: DropdownButtonFormField<int>(
-            decoration: const InputDecoration(labelText: '日'),
-            items: dayItems,
-            value: dayValue,
-            onChanged: (_isSaving || _isRunningOcr)
-                ? null
-                : (value) {
-              setState(() {
-                _selectedDay = value;
-                _ocrErrorMessage = null;
-              });
-            },
-            validator: (value) => (value == null) ? '日を選択してください' : null,
-          ),
+        buildDropdown<int>(
+          label: '日',
+          value: validDay!,
+          items: dayItems,
+          onChanged: _isSaving ? null : (v) => setState(() { _selectedDay = v; _ocrErrorMessage = null; }),
         ),
       ],
     );
   }
 
-  // ======================
-  // バーコードスキャン（モーダル）
-  // ======================
-  Future<void> _openBarcodeScannerModal(BuildContext context) async {
-    if (kIsWeb) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Web上ではバーコードスキャンは未対応です。'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-      return;
-    }
-
-    final result = await showModalBottomSheet<String>(
-      context: context,
-      useSafeArea: true,
-      isScrollControlled: true,
-      builder: (ctx) {
-        bool isDetecting = true;
-
-        return SizedBox(
-          height: MediaQuery.of(ctx).size.height * 0.65,
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'バーコードをスキャン',
-                        style: Theme.of(ctx).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.of(ctx).pop(),
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
-                ),
-              ),
-              const Divider(height: 1),
-              Expanded(
-                child: MobileScanner(
-                  controller: MobileScannerController(
-                    detectionSpeed: DetectionSpeed.noDuplicates,
-                    facing: CameraFacing.back,
-                  ),
-                  onDetect: (capture) {
-                    if (!isDetecting) return;
-
-                    final barcodes = capture.barcodes;
-                    if (barcodes.isEmpty) return;
-
-                    final rawValue = barcodes.first.rawValue;
-                    if (rawValue == null || rawValue.trim().isEmpty) return;
-
-                    isDetecting = false;
-                    Navigator.of(ctx).pop(rawValue.trim());
-                  },
-                ),
-              ),
-              const Divider(height: 1),
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  'うまく読めない場合は、明るい場所でピントを合わせてください。',
-                  style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-
-    if (!mounted) return;
-    if (result == null || result.trim().isEmpty) return;
-
-    setState(() {
-      _janCode = result.trim();
-      _janMasterErrorMessage = null;
-      _masterName = null;
-      _masterPrice = null;
-      _ocrErrorMessage = null;
-    });
-
-    await _loadJanMasterForJanCode(result.trim());
-  }
-
-  /// JANコードに対応するJANマスタを読み込み、（空欄なら）フォームへ自動入力する
-  Future<void> _loadJanMasterForJanCode(String janCode) async {
-    setState(() {
-      _isLoadingJanMaster = true;
-      _janMasterErrorMessage = null;
-      _masterName = null;
-      _masterPrice = null;
-    });
-
-    try {
-      final repo = ref.read(janMasterRepositoryProvider);
-      final entry = await repo.fetchJan(janCode);
-
-      if (!mounted) return;
-
-      if (entry == null) {
-        setState(() {
-          _isLoadingJanMaster = false;
-          _janMasterErrorMessage = null;
-          _masterName = null;
-          _masterPrice = null;
-        });
-        return;
-      }
-
-      setState(() {
-        _isLoadingJanMaster = false;
-        _masterName = entry.name;
-        _masterPrice = entry.price;
-      });
-
-      _applyMasterToControllersIfEmpty();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _isLoadingJanMaster = false;
-        _janMasterErrorMessage = 'マスタの読み込みに失敗しました: $e';
-      });
-    }
-  }
-
-  void _applyMasterToControllersIfEmpty() {
-    if (!mounted) return;
-
-    final name = _masterName;
-    final price = _masterPrice;
-
-    if (name != null && name.trim().isNotEmpty) {
-      if (_nameController.text.trim().isEmpty) {
-        _nameController.text = name;
-      }
-    }
-    if (price != null) {
-      if (_priceController.text.trim().isEmpty) {
-        _priceController.text = price.toString();
-      }
-    }
-  }
-
-  // ======================
-  // OCR（撮影→解析→プルダウンへ反映。プレビュー等はしない）
-  // ======================
-  Future<void> _onTapCaptureExpiry() async {
-    if (kIsWeb) {
-      setState(() {
-        _ocrErrorMessage = 'Web上ではカメラ撮影とOCRは未対応です。';
-      });
-      return;
-    }
-
-    try {
-      setState(() {
-        _isRunningOcr = true;
-        _ocrErrorMessage = null;
-      });
-
-      final XFile? image = await _picker.pickImage(
-        source: ImageSource.camera,
-        maxWidth: 1600,
-        maxHeight: 1600,
-      );
-
-      if (image == null) {
-        setState(() {
-          _isRunningOcr = false;
-        });
-        return;
-      }
-
-      final inputImage = InputImage.fromFilePath(image.path);
-      final textRecognizer = TextRecognizer(
-        script: TextRecognitionScript.latin,
-      );
-
-      final recognizedText = await textRecognizer.processImage(inputImage);
-      await textRecognizer.close();
-
-      final text = recognizedText.text;
-      final parsed = _tryParseExpiryFromText(text);
-
-      setState(() {
-        _isRunningOcr = false;
-
-        if (parsed != null) {
-          _applyExpiryFromDate(parsed);
-          _ocrErrorMessage = null;
-        } else {
-          _ocrErrorMessage = '賞味期限の日付を自動で特定できませんでした。プルダウンから選択してください。';
-        }
-      });
-    } catch (e) {
-      setState(() {
-        _isRunningOcr = false;
-        _ocrErrorMessage = 'OCR中にエラーが発生しました: $e';
-      });
-    }
-  }
-
-  // ======================
-  // SnackBar（ボタンを隠さないよう上に出す）
-  // ======================
-  void _showSavedSnackBar() {
-    final messenger = ScaffoldMessenger.of(context);
-    final bottomSafe = MediaQuery.of(context).padding.bottom;
-
-    final marginBottom = bottomSafe + 140;
-
-    messenger.clearSnackBars();
-    messenger.showSnackBar(
-      SnackBar(
-        content: const Text('登録しました'),
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 2),
-        margin: EdgeInsets.fromLTRB(16, 0, 16, marginBottom),
-      ),
-    );
-  }
-
-  // ======================
-  // 登録（Firestoreに保存）
-  // ======================
   Future<void> _onSubmit() async {
     FocusScope.of(context).unfocus();
-
     if (_isSaving) return;
-
-    if (_formKey.currentState?.validate() != true) {
-      return;
-    }
+    if (_formKey.currentState?.validate() != true) return;
 
     final expiry = _buildSelectedExpiry();
     if (expiry == null) {
-      setState(() {
-        _ocrErrorMessage = '賞味期限を選択してください。';
-      });
+      setState(() => _ocrErrorMessage = '賞味期限を選択してください。');
       return;
     }
 
     final name = _nameController.text.trim();
-    final priceText = _priceController.text.trim();
-    int? price;
-
-    if (priceText.isNotEmpty) {
-      price = int.tryParse(priceText.replaceAll(',', '').trim());
-      if (price == null) {
-        setState(() {
-          _ocrErrorMessage = '売価には数値を入力してください。';
-        });
-        return;
-      }
-    }
-
+    final price = int.tryParse(_priceController.text.replaceAll(',', '').trim());
     final shopId = ref.read(currentShopIdProvider);
+
     if (shopId.isEmpty) {
-      setState(() {
-        _ocrErrorMessage = '店舗が未選択のため登録できません。';
-      });
+      setState(() => _ocrErrorMessage = '店舗が未選択のため登録できません。');
       return;
     }
 
-    setState(() {
-      _isSaving = true;
-    });
+    setState(() => _isSaving = true);
 
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      final db = FirebaseFirestore.instance;
-
-      await db.collection('shops').doc(shopId).collection('snacks').add({
-        'name': name,
-        'expiry': Timestamp.fromDate(expiry),
-        'janCode': (_janCode != null && _janCode!.trim().isNotEmpty) ? _janCode!.trim() : null,
-        'price': price,
-        'isArchived': false,
-        'createdAt': FieldValue.serverTimestamp(),
-        'createdByUserId': user?.uid,
-        'updatedAt': FieldValue.serverTimestamp(),
-        'updatedByUserId': user?.uid,
-      });
-
-      final snack = SnackItem(
+      final newItem = SnackItem(
         name: name,
         expiry: expiry,
-        janCode: (_janCode != null && _janCode!.trim().isNotEmpty) ? _janCode!.trim() : null,
+        janCode: (_janCode?.isNotEmpty == true) ? _janCode!.trim() : null,
         price: price,
       );
-      await _updateJanMasterIfNeeded(snack);
+
+      final savedItem = await ref.read(snackRepositoryProvider).addSnack(newItem);
+      _updateJanMasterIfNeeded(savedItem);
 
       if (!mounted) return;
 
-      if (_keepAdding) {
-        setState(() {
-          _isSaving = false;
-        });
+      final isKeepAdding = ref.read(appSettingsProvider).isKeepAddingEnabled;
 
-        _showSavedSnackBar();
+      if (isKeepAdding) {
+        setState(() => _isSaving = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('登録しました'), duration: Duration(seconds: 2)),
+        );
         _resetFormForNext();
-        return;
+      } else {
+        Navigator.of(context).pop(savedItem);
       }
-
-      Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -909,15 +544,11 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
     }
   }
 
-  /// JANマスタへの upsert（JANコードが無い場合は何もしない）。
   Future<void> _updateJanMasterIfNeeded(SnackItem snack) async {
     final jan = snack.janCode;
-    if (jan == null || jan.isEmpty) {
-      return;
-    }
-
+    if (jan == null || jan.isEmpty) return;
     try {
-      final user = FirebaseAuth.instance.currentUser;
+      final user = ref.read(appUserStreamProvider).value;
       final repo = ref.read(janMasterRepositoryProvider);
       await repo.upsertJan(
         janCode: jan,
@@ -925,158 +556,234 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
         price: snack.price,
         userId: user?.uid ?? 'anonymous',
       );
-    } catch (_) {
-      // SnackBar禁止のため黙って握りつぶす（必要ならどこかにログ/画面内表示へ）
+    } catch (_) {}
+  }
+
+  Future<void> _openBarcodeScannerModal(BuildContext context) async {
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) {
+        return SizedBox(
+          height: MediaQuery.of(ctx).size.height * 0.65,
+          child: Column(
+            children: [
+              AppBar(title: const Text('バーコードをスキャン'), automaticallyImplyLeading: false, actions: [CloseButton()]),
+              Expanded(
+                child: MobileScanner(
+                  controller: _scannerController,
+                  onDetect: (capture) {
+                    final barcodes = capture.barcodes;
+                    if (barcodes.isNotEmpty) {
+                      final val = barcodes.first.rawValue;
+                      if (val != null) Navigator.of(ctx).pop(val);
+                    }
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (result != null && mounted) {
+      setState(() => _janCode = result);
+      await _loadJanMasterForJanCode(result);
     }
   }
 
-  // ======================
-  // OCR解析（既存ロジック流用）
-  // ======================
-  DateTime? _tryParseExpiryFromText(String text) {
-    final now = DateTime.now();
-
-    final normalized = _normalizeOcrTextForParse(text);
-    final fixed = _fixDigits(normalized);
-
-    final candidates = <DateTime>[];
-
-    for (final m in RegExp(r'\b(\d{4})(\d{2})(\d{2})\b').allMatches(fixed)) {
-      final year = int.tryParse(m.group(1)!);
-      final month = int.tryParse(m.group(2)!);
-      final day = int.tryParse(m.group(3)!);
-      if (year == null || month == null || day == null) continue;
-      if (_isValidYmd(year, month, day)) {
-        final dt = DateTime(year, month, day);
-        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
+  Future<void> _loadJanMasterForJanCode(String janCode) async {
+    setState(() => _isLoadingJanMaster = true);
+    try {
+      final entry = await ref.read(janMasterRepositoryProvider).fetchJan(janCode);
+      if (mounted) {
+        setState(() {
+          _isLoadingJanMaster = false;
+          _masterName = entry?.name;
+          _masterPrice = entry?.price;
+        });
+        _applyMasterToControllersIfEmpty();
       }
+    } catch (e) {
+      if (mounted) setState(() => _isLoadingJanMaster = false);
     }
-
-    for (final m in RegExp(r'\b(\d{2})(\d{2})(\d{2})\b').allMatches(fixed)) {
-      final yy = int.tryParse(m.group(1)!);
-      final month = int.tryParse(m.group(2)!);
-      final day = int.tryParse(m.group(3)!);
-      if (yy == null || month == null || day == null) continue;
-      final year = 2000 + yy;
-      if (_isValidYmd(year, month, day)) {
-        final dt = DateTime(year, month, day);
-        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
-      }
-    }
-
-    for (final m in RegExp(r'\b(\d{4})\s+(\d{1,2})\s+(\d{1,2})\b').allMatches(fixed)) {
-      final year = int.tryParse(m.group(1)!);
-      final month = int.tryParse(m.group(2)!);
-      final day = int.tryParse(m.group(3)!);
-      if (year == null || month == null || day == null) continue;
-      if (_isValidYmd(year, month, day)) {
-        final dt = DateTime(year, month, day);
-        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
-      }
-    }
-
-    for (final m in RegExp(r'\b(\d{2})\s+(\d{1,2})\s+(\d{1,2})\b').allMatches(fixed)) {
-      final yy = int.tryParse(m.group(1)!);
-      final month = int.tryParse(m.group(2)!);
-      final day = int.tryParse(m.group(3)!);
-      if (yy == null || month == null || day == null) continue;
-      final year = 2000 + yy;
-      if (_isValidYmd(year, month, day)) {
-        final dt = DateTime(year, month, day);
-        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
-      }
-    }
-
-    for (final m in RegExp(r'\b(\d{4})\s+(\d{1,2})\b').allMatches(fixed)) {
-      final year = int.tryParse(m.group(1)!);
-      final month = int.tryParse(m.group(2)!);
-      if (year == null || month == null) continue;
-      if (month < 1 || month > 12) continue;
-      final lastDay = _lastDayOfMonth(year, month);
-      if (_isValidYmd(year, month, lastDay)) {
-        final dt = DateTime(year, month, lastDay);
-        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
-      }
-    }
-
-    for (final m in RegExp(r'\b(\d{2})\s+(\d{1,2})\b').allMatches(fixed)) {
-      final yy = int.tryParse(m.group(1)!);
-      final month = int.tryParse(m.group(2)!);
-      if (yy == null || month == null) continue;
-      final year = 2000 + yy;
-      if (month < 1 || month > 12) continue;
-      final lastDay = _lastDayOfMonth(year, month);
-      if (_isValidYmd(year, month, lastDay)) {
-        final dt = DateTime(year, month, lastDay);
-        if (_isPlausibleExpiry(dt, now)) candidates.add(dt);
-      }
-    }
-
-    if (candidates.isEmpty) return null;
-
-    candidates.sort((a, b) => _expiryScore(a, now).compareTo(_expiryScore(b, now)));
-    return candidates.first;
   }
 
-  String _normalizeOcrTextForParse(String text) {
-    final s = text
-        .replaceAll('年', ' ')
-        .replaceAll('月', ' ')
-        .replaceAll('日', ' ')
-        .replaceAll(RegExp(r'[\/\.\-\,，、]'), ' ')
-        .replaceAll(RegExp(r'[^0-9A-Za-z\s]'), ' ')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-
-    return s;
-  }
-
-  String _fixDigits(String s) {
-    final upper = s.toUpperCase();
-
-    const map = <String, String>{
-      'O': '0',
-      'D': '0',
-      'Q': '0',
-      'I': '1',
-      'L': '1',
-      '|': '1',
-      '!': '1',
-      'Z': '2',
-      'S': '5',
-      'B': '8',
-    };
-
-    final buf = StringBuffer();
-    for (final ch in upper.split('')) {
-      buf.write(map[ch] ?? ch);
+  void _applyMasterToControllersIfEmpty() {
+    if (_masterName != null && _nameController.text.isEmpty) {
+      _nameController.text = _masterName!;
     }
-    return buf.toString();
-  }
-
-  bool _isPlausibleExpiry(DateTime dt, DateTime now) {
-    final min = DateTime(now.year - 10, 1, 1);
-    final max = DateTime(now.year + 30, 12, 31);
-    return !dt.isBefore(min) && !dt.isAfter(max);
-  }
-
-  int _expiryScore(DateTime dt, DateTime now) {
-    final diffDays = dt.difference(now).inDays;
-    if (diffDays >= 0) {
-      return diffDays;
+    if (_masterPrice != null && _priceController.text.isEmpty) {
+      _priceController.text = _masterPrice.toString();
     }
-    return 100000 + diffDays.abs();
   }
 
-  bool _isValidYmd(int year, int month, int day) {
-    if (month < 1 || month > 12) return false;
-    if (day < 1 || day > 31) return false;
+  Future<void> _showFrequentPricesManageDialog(BuildContext context, String shopId) async {
+    // ★ 追加: ダイアログを開く前にキーボードを閉じる
+    FocusScope.of(context).unfocus();
+
+    final doc = await FirebaseFirestore.instance.collection('shops').doc(shopId).get();
+    final rawList = doc.data()?['frequentPrices'] as List<dynamic>? ?? [];
+    final currentPrices = rawList.cast<int>()..sort();
+
+    if (!context.mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => _FrequentPricesDialog(
+        initialPrices: currentPrices,
+        onSave: (newPrices) async {
+          final repo = ref.read(shopRepositoryProvider);
+          await repo.updateFrequentPrices(shopId, newPrices);
+        },
+      ),
+    );
+  }
+
+  Future<void> _onTapCaptureExpiry() async {
+    setState(() {
+      _isRunningOcr = true;
+      _ocrErrorMessage = null;
+    });
 
     try {
-      final dt = DateTime(year, month, day);
-      return dt.year == year && dt.month == month && dt.day == day;
-    } catch (_) {
-      return false;
+      final XFile? image = await _picker.pickImage(source: ImageSource.camera);
+      if (image == null) {
+        setState(() => _isRunningOcr = false);
+        return;
+      }
+
+      final inputImage = InputImage.fromFilePath(image.path);
+      final textRecognizer = TextRecognizer(script: TextRecognitionScript.japanese);
+
+      try {
+        final RecognizedText recognizedText = await textRecognizer.processImage(inputImage);
+        final text = recognizedText.text;
+
+        final date = _tryParseExpiryFromText(text);
+        if (date != null) {
+          _applyExpiryFromDate(date);
+        } else {
+          setState(() => _ocrErrorMessage = '日付を読み取れませんでした');
+        }
+      } finally {
+        textRecognizer.close();
+      }
+    } catch (e) {
+      setState(() => _ocrErrorMessage = '読み取りエラー: $e');
+    } finally {
+      if (mounted) setState(() => _isRunningOcr = false);
     }
+  }
+
+  DateTime? _tryParseExpiryFromText(String text) {
+    final patterns = [
+      RegExp(r'20(\d{2})[\./-](\d{1,2})[\./-](\d{1,2})'),
+      RegExp(r'(\d{4})[\./-](\d{1,2})[\./-](\d{1,2})'),
+      RegExp(r'(\d{2})[\./-](\d{1,2})[\./-](\d{1,2})'),
+    ];
+
+    final lines = text.split('\n');
+    for (final line in lines) {
+      for (final regex in patterns) {
+        final match = regex.firstMatch(line);
+        if (match != null) {
+          try {
+            int y = int.parse(match.group(1)!);
+            int m = int.parse(match.group(2)!);
+            int d = int.parse(match.group(3)!);
+            if (y < 100) y += 2000;
+            return DateTime(y, m, d);
+          } catch (_) {
+            continue;
+          }
+        }
+      }
+    }
+    return null;
+  }
+}
+
+class _FrequentPricesDialog extends StatefulWidget {
+  const _FrequentPricesDialog({required this.initialPrices, required this.onSave});
+  final List<int> initialPrices;
+  final ValueChanged<List<int>> onSave;
+
+  @override
+  State<_FrequentPricesDialog> createState() => _FrequentPricesDialogState();
+}
+
+class _FrequentPricesDialogState extends State<_FrequentPricesDialog> {
+  late List<int> _prices;
+  final _controller = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _prices = List.of(widget.initialPrices);
+  }
+
+  void _addPrice() {
+    final val = int.tryParse(_controller.text);
+    if (val != null && !_prices.contains(val)) {
+      setState(() {
+        _prices.add(val);
+        _prices.sort();
+        _controller.clear();
+      });
+    }
+  }
+
+  void _removePrice(int val) {
+    setState(() {
+      _prices.remove(val);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('よく使う売価の設定'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _controller,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: '追加する価格', hintText: '10'),
+                    onSubmitted: (_) => _addPrice(),
+                  ),
+                ),
+                IconButton(icon: const Icon(Icons.add_circle), onPressed: _addPrice),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              children: _prices.map((p) => Chip(
+                label: Text('$p円'),
+                onDeleted: () => _removePrice(p),
+              )).toList(),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('キャンセル')),
+        FilledButton(
+          onPressed: () {
+            widget.onSave(_prices);
+            Navigator.of(context).pop();
+          },
+          child: const Text('保存'),
+        ),
+      ],
+    );
   }
 }

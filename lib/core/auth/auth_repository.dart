@@ -16,27 +16,24 @@ class AuthRepository {
   Stream<User?> authStateChanges() => _auth.authStateChanges();
 
   /// Google アカウントでサインイン。
-  ///
-  /// 成功時は UserCredential を返す。
   Future<UserCredential?> signInWithGoogle() async {
-    final googleProvider = GoogleAuthProvider();
-
-    // 必要ならここでスコープやカスタムパラメータを追加できる
-    // googleProvider.addScope('https://www.googleapis.com/auth/userinfo.email');
-    // googleProvider.setCustomParameters({'prompt': 'select_account'});
-
-    final userCredential = await _auth.signInWithProvider(googleProvider);
-    return userCredential;
+    try {
+      final googleProvider = GoogleAuthProvider();
+      // 2026年現在の推奨メソッドを使用
+      return await _auth.signInWithProvider(googleProvider);
+    } on FirebaseAuthException catch (e) {
+      // ユーザーが選択画面を閉じた場合などは null を返して安全に終了させる
+      if (e.code == 'closed-by-user' || e.code == 'canceled') {
+        return null;
+      }
+      rethrow;
+    } catch (e) {
+      rethrow;
+    }
   }
 
   /// Apple ID でサインイン。
-  ///
-  /// iOS の App Store 審査要件（サードパーティログインを提供する場合）に対応するために追加。
-  /// 成功時は UserCredential を返す。
-  ///
-  /// ※ユーザーがキャンセルした場合は null を返す。
   Future<UserCredential?> signInWithApple() async {
-    // Apple Sign-In は nonce 付きで行うのが推奨（リプレイ攻撃対策）
     final rawNonce = _generateNonce();
     final nonce = _sha256ofString(rawNonce);
 
@@ -62,10 +59,9 @@ class AuthRepository {
         rawNonce: rawNonce,
       );
 
-      final userCredential = await _auth.signInWithCredential(oauthCredential);
-      return userCredential;
+      return await _auth.signInWithCredential(oauthCredential);
     } on SignInWithAppleAuthorizationException catch (e) {
-      // ユーザーがキャンセルした場合は null 扱い
+      // ユーザーキャンセル時は null 扱い
       if (e.code == AuthorizationErrorCode.canceled) {
         return null;
       }
@@ -78,16 +74,15 @@ class AuthRepository {
     await _auth.signOut();
   }
 
-  /// ランダムnonceを生成（Firebase推奨パターン）
+  /// ランダムnonceを生成
   String _generateNonce([int length = 32]) {
     const charset =
         '0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._';
     final random = Random.secure();
-    final chars = List<String>.generate(
+    return List<String>.generate(
       length,
           (_) => charset[random.nextInt(charset.length)],
-    );
-    return chars.join();
+    ).join();
   }
 
   /// SHA256ハッシュ
@@ -98,13 +93,10 @@ class AuthRepository {
   }
 }
 
-/// AuthRepository を提供する Provider。
 final authRepositoryProvider = Provider<AuthRepository>((ref) {
   return AuthRepository(FirebaseAuth.instance);
 });
 
-/// 認証状態 (User? の Stream) を監視する Provider。
 final authStateChangesProvider = StreamProvider<User?>((ref) {
-  final repo = ref.watch(authRepositoryProvider);
-  return repo.authStateChanges();
+  return ref.watch(authRepositoryProvider).authStateChanges();
 });
