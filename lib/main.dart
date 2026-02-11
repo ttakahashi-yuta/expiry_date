@@ -13,6 +13,8 @@ import 'package:expiry_date/core/snacks/snack_repository.dart';
 import 'package:expiry_date/screens/shop_selection_screen.dart';
 import 'package:expiry_date/screens/edit_snack_screen.dart';
 import 'package:expiry_date/screens/trash_screen.dart';
+import 'package:expiry_date/core/notifications/notification_service.dart';
+import 'package:expiry_date/core/notifications/badge_provider.dart'; // ★追加: バッジプロバイダーをインポート
 
 import 'firebase_options.dart';
 import 'core/auth/auth_repository.dart';
@@ -23,6 +25,9 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  // 通知サービスのインスタンスを作って初期化
+  final notificationService = NotificationService();
+  await notificationService.init();
   runApp(const ProviderScope(child: ExpiryDateApp()));
 }
 
@@ -122,6 +127,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   _SortKey _sortKey = _SortKey.expiry;
   bool _sortAscending = true;
   final GlobalKey _sortButtonKey = GlobalKey();
+
+  @override
+  void initState() {
+    super.initState();
+    // 画面が表示されたら、iOS側に「通知（バッジ）を使ってもいいですか？」と聞く
+    // これがないとiPhoneではバッジが出ません
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(notificationServiceProvider).requestPermissions();
+    });
+  }
+
 
   @override
   void dispose() {
@@ -322,6 +338,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // ★追加: ここで badgeProvider を watch することでバッジ更新が有効になります
+    ref.watch(badgeProvider);
+
     final now = DateTime.now();
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     final soonThresholdDays = ref.watch(appSettingsProvider).soonThresholdDays;
@@ -518,6 +537,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  // _buildSnackCard, _buildStatusIndicator, _buildBottomSection, _buildBottomActionBar は変更なしのため省略しません（念のためそのまま記述しています）
+
   Widget _buildSnackCard(SnackItem snack, int daysLeft, Color backgroundColor) {
     final bool isExpired = daysLeft < 0;
     final String expiryText = snack.expiry.toLocal().toString().split(' ')[0];
@@ -687,8 +708,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ),
           GestureDetector(
             onTap: () async {
-              // ★重要：戻り値を受け取っても保存はしない
-              // 保存は AddSnackFlowScreen 側で完了しています
               await Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const AddSnackFlowScreen()),
               );

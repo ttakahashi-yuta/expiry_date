@@ -32,11 +32,12 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('店舗設定')),
-      backgroundColor: theme.colorScheme.surface, // 背景色
+      backgroundColor: theme.colorScheme.surface,
       body: appUserAsync.when(
         data: (appUser) {
           final currentShopId = appUser?.currentShopId;
           final hasShop = currentShopId != null && currentShopId.trim().isNotEmpty;
+          final uid = appUser?.uid;
 
           return ListView(
             padding: const EdgeInsets.symmetric(vertical: 16),
@@ -49,17 +50,18 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
 
               // 2. 切り替え・参加アクション
               _SectionHeader(title: 'アクション'),
-              // ★追加予定の「店舗切り替え」
+
+              // ★修正: 店舗切り替えボタンを有効化
               ListTile(
                 leading: const Icon(Icons.swap_horiz),
                 title: const Text('店舗を切り替える'),
                 subtitle: const Text('参加済みの他の店舗へ移動します'),
-                trailing: const Chip(label: Text('準備中', style: TextStyle(fontSize: 10))),
-                enabled: false, // まだ押せない
-                onTap: () {
-                  // TODO: 店舗切り替えダイアログの実装
-                },
+                trailing: const Icon(Icons.chevron_right),
+                onTap: uid == null
+                    ? null
+                    : () => _showSwitchShopModal(context, uid, currentShopId),
               ),
+
               ListTile(
                 leading: const Icon(Icons.qr_code_scanner),
                 title: const Text('招待QRを読み取る'),
@@ -99,7 +101,7 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
       child: FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
         future: FirebaseFirestore.instance.collection('shops').doc(shopId).get(),
         builder: (context, snapshot) {
-          final shopName = snapshot.data?.data()?['name'] as String? ?? '読み込み中...';
+          final shopName = snapshot.data?.data()?['name'] as String? ?? '店舗情報を取得中...';
 
           return Container(
             padding: const EdgeInsets.all(20),
@@ -163,7 +165,7 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
     );
   }
 
-  /// オーナー向けメニュー（メンバーシップを確認して表示）
+  /// オーナー向けメニュー
   Widget _buildOwnerMenu(BuildContext context, String shopId) {
     final shopRepo = ref.read(shopRepositoryProvider);
 
@@ -198,6 +200,27 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
   // ロジック（ダイアログ表示など）
   // ==========================================
 
+  // ★追加: 店舗切り替えモーダルを表示
+  void _showSwitchShopModal(BuildContext context, String uid, String? currentShopId) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) => _ShopSwitchModal(
+        uid: uid,
+        currentShopId: currentShopId,
+        onCreateTap: () {
+          Navigator.of(ctx).pop();
+          _showCreateShopDialog(context);
+        },
+        onScanTap: () {
+          Navigator.of(ctx).pop();
+          _onScanInviteQr(context);
+        },
+      ),
+    );
+  }
+
   /// 新規店舗作成ダイアログ
   Future<void> _showCreateShopDialog(BuildContext context) async {
     final controller = TextEditingController();
@@ -227,8 +250,8 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
           FilledButton(
             onPressed: () async {
               if (formKey.currentState!.validate()) {
-                Navigator.of(ctx).pop(); // ダイアログを閉じる
-                await _onCreateNewShop(context, controller.text.trim()); // 作成処理へ
+                Navigator.of(ctx).pop();
+                await _onCreateNewShop(context, controller.text.trim());
               }
             },
             child: const Text('作成'),
@@ -383,7 +406,7 @@ class _ShopSelectionScreenState extends ConsumerState<ShopSelectionScreen> {
 }
 
 // ==========================================
-// ヘルパーウィジェット
+// ヘルパーウィジェット / モーダル
 // ==========================================
 
 class _SectionHeader extends StatelessWidget {
@@ -402,6 +425,133 @@ class _SectionHeader extends StatelessWidget {
           fontWeight: FontWeight.bold,
         ),
       ),
+    );
+  }
+}
+
+// ★追加: 店舗切り替えモーダル
+class _ShopSwitchModal extends StatelessWidget {
+  const _ShopSwitchModal({
+    required this.uid,
+    required this.currentShopId,
+    required this.onCreateTap,
+    required this.onScanTap,
+  });
+
+  final String uid;
+  final String? currentShopId;
+  final VoidCallback onCreateTap;
+  final VoidCallback onScanTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.6,
+      minChildSize: 0.4,
+      maxChildSize: 0.9,
+      expand: false,
+      builder: (context, scrollController) {
+        return Column(
+          children: [
+            // モーダルハンドル
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey[300],
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const Text(
+              '店舗を切り替える',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 12),
+            const Divider(height: 1),
+
+            // 店舗リスト
+            Expanded(
+              child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                // memberships サブコレクションを監視
+                stream: FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(uid)
+                    .collection('memberships')
+                    .orderBy('joinedAt', descending: true)
+                    .snapshots(),
+                builder: (context, snapshot) {
+                  if (snapshot.hasError) return Center(child: Text('エラー: ${snapshot.error}'));
+                  if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+
+                  final docs = snapshot.data!.docs;
+                  if (docs.isEmpty) {
+                    return const Center(child: Text('所属している店舗がありません'));
+                  }
+
+                  return ListView.builder(
+                    controller: scrollController,
+                    itemCount: docs.length,
+                    itemBuilder: (context, index) {
+                      final data = docs[index].data();
+                      final shopId = docs[index].id;
+                      final shopName = data['shopNameCache'] as String?;
+
+                      // shopNameCacheがない場合は表示しない（前提条件に従う）
+                      if (shopName == null || shopName.isEmpty) {
+                        return const SizedBox.shrink();
+                      }
+
+                      final isSelected = shopId == currentShopId;
+
+                      return ListTile(
+                        leading: Icon(
+                          Icons.store,
+                          color: isSelected ? Theme.of(context).colorScheme.primary : Colors.grey,
+                        ),
+                        title: Text(
+                          shopName,
+                          style: TextStyle(
+                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                          ),
+                        ),
+                        trailing: isSelected
+                            ? Icon(Icons.check, color: Theme.of(context).colorScheme.primary)
+                            : null,
+                        onTap: () async {
+                          // FirestoreのcurrentShopIdを更新（これでアプリ全体の店舗が切り替わる）
+                          await FirebaseFirestore.instance
+                              .collection('users')
+                              .doc(uid)
+                              .update({'currentShopId': shopId});
+
+                          if (context.mounted) {
+                            Navigator.of(context).pop(); // モーダルを閉じる
+                          }
+                        },
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+
+            const Divider(height: 1),
+            // フッターアクション（作成・読み取り）
+            ListTile(
+              leading: const Icon(Icons.add_business),
+              title: const Text('新しい店舗を作成'),
+              onTap: onCreateTap,
+            ),
+            ListTile(
+              leading: const Icon(Icons.qr_code_scanner),
+              title: const Text('招待QRを読み取る'),
+              onTap: onScanTap,
+            ),
+            SizedBox(height: MediaQuery.of(context).padding.bottom + 8),
+          ],
+        );
+      },
     );
   }
 }

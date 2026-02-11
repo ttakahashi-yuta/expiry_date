@@ -11,6 +11,8 @@ import 'package:expiry_date/core/settings/app_settings.dart';
 import 'package:expiry_date/core/user/user_providers.dart';
 import 'package:expiry_date/core/snacks/snack_repository.dart';
 import '../models/snack_item.dart';
+// ★追加: 共通ダイアログをインポート
+import 'package:expiry_date/widgets/frequent_prices_dialog.dart';
 
 class AddSnackFlowScreen extends ConsumerStatefulWidget {
   const AddSnackFlowScreen({super.key});
@@ -20,7 +22,7 @@ class AddSnackFlowScreen extends ConsumerStatefulWidget {
 }
 
 class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
-  late MobileScannerController _scannerController;
+  // MobileScannerControllerはここには持ちません（_ScannerModalで管理）
 
   // 入力状態
   String? _janCode;
@@ -50,18 +52,12 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   void initState() {
     super.initState();
     _setExpiryToDefaultValues();
-    _scannerController = MobileScannerController(
-      detectionSpeed: DetectionSpeed.noDuplicates,
-      facing: CameraFacing.back,
-      torchEnabled: false,
-    );
   }
 
   @override
   void dispose() {
     _nameController.dispose();
     _priceController.dispose();
-    _scannerController.dispose();
     super.dispose();
   }
 
@@ -411,7 +407,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
                     ActionChip(
                       avatar: const Icon(Icons.add, size: 16),
                       label: const Text('追加'),
-                      backgroundColor: Theme.of(context).colorScheme.surfaceVariant,
+                      backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
                       onPressed: () => _showFrequentPricesManageDialog(context, shopId),
                     ),
                   ],
@@ -564,26 +560,7 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
       context: context,
       isScrollControlled: true,
       builder: (ctx) {
-        return SizedBox(
-          height: MediaQuery.of(ctx).size.height * 0.65,
-          child: Column(
-            children: [
-              AppBar(title: const Text('バーコードをスキャン'), automaticallyImplyLeading: false, actions: [CloseButton()]),
-              Expanded(
-                child: MobileScanner(
-                  controller: _scannerController,
-                  onDetect: (capture) {
-                    final barcodes = capture.barcodes;
-                    if (barcodes.isNotEmpty) {
-                      final val = barcodes.first.rawValue;
-                      if (val != null) Navigator.of(ctx).pop(val);
-                    }
-                  },
-                ),
-              ),
-            ],
-          ),
-        );
+        return const _ScannerModal(); // 下で定義したクラスを使用
       },
     );
 
@@ -631,7 +608,8 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
 
     await showDialog(
       context: context,
-      builder: (ctx) => _FrequentPricesDialog(
+      // ★修正: 共通ウィジェットを使用
+      builder: (ctx) => FrequentPricesDialog(
         initialPrices: currentPrices,
         onSave: (newPrices) async {
           final repo = ref.read(shopRepositoryProvider);
@@ -705,85 +683,61 @@ class _AddSnackFlowScreenState extends ConsumerState<AddSnackFlowScreen> {
   }
 }
 
-class _FrequentPricesDialog extends StatefulWidget {
-  const _FrequentPricesDialog({required this.initialPrices, required this.onSave});
-  final List<int> initialPrices;
-  final ValueChanged<List<int>> onSave;
+// スキャン画面用モーダル（この中でコントローラーを生成・破棄する）
+class _ScannerModal extends StatefulWidget {
+  const _ScannerModal();
 
   @override
-  State<_FrequentPricesDialog> createState() => _FrequentPricesDialogState();
+  State<_ScannerModal> createState() => _ScannerModalState();
 }
 
-class _FrequentPricesDialogState extends State<_FrequentPricesDialog> {
-  late List<int> _prices;
-  final _controller = TextEditingController();
+class _ScannerModalState extends State<_ScannerModal> {
+  // コントローラーはこのStateが持てる期間だけ生存させる
+  final MobileScannerController _controller = MobileScannerController(
+    detectionSpeed: DetectionSpeed.noDuplicates,
+    facing: CameraFacing.back,
+    torchEnabled: false,
+  );
+
+  // 連続読み取り防止用のフラグ
+  bool _isScanned = false;
 
   @override
-  void initState() {
-    super.initState();
-    _prices = List.of(widget.initialPrices);
-  }
-
-  void _addPrice() {
-    final val = int.tryParse(_controller.text);
-    if (val != null && !_prices.contains(val)) {
-      setState(() {
-        _prices.add(val);
-        _prices.sort();
-        _controller.clear();
-      });
-    }
-  }
-
-  void _removePrice(int val) {
-    setState(() {
-      _prices.remove(val);
-    });
+  void dispose() {
+    _controller.dispose(); // モーダルを閉じたタイミングで確実に破棄
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('よく使う売価の設定'),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    keyboardType: TextInputType.number,
-                    decoration: const InputDecoration(labelText: '追加する価格', hintText: '10'),
-                    onSubmitted: (_) => _addPrice(),
-                  ),
-                ),
-                IconButton(icon: const Icon(Icons.add_circle), onPressed: _addPrice),
-              ],
+    return SizedBox(
+      height: MediaQuery.of(context).size.height * 0.65,
+      child: Column(
+        children: [
+          AppBar(
+            title: const Text('バーコードをスキャン'),
+            automaticallyImplyLeading: false,
+            actions: [CloseButton()],
+          ),
+          Expanded(
+            child: MobileScanner(
+              controller: _controller,
+              onDetect: (capture) {
+                if (_isScanned) return;
+
+                final barcodes = capture.barcodes;
+                if (barcodes.isNotEmpty) {
+                  final val = barcodes.first.rawValue;
+                  if (val != null) {
+                    _isScanned = true;
+                    Navigator.of(context).pop(val);
+                  }
+                }
+              },
             ),
-            const SizedBox(height: 16),
-            Wrap(
-              spacing: 8,
-              children: _prices.map((p) => Chip(
-                label: Text('$p円'),
-                onDeleted: () => _removePrice(p),
-              )).toList(),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
-      actions: [
-        TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('キャンセル')),
-        FilledButton(
-          onPressed: () {
-            widget.onSave(_prices);
-            Navigator.of(context).pop();
-          },
-          child: const Text('保存'),
-        ),
-      ],
     );
   }
 }
